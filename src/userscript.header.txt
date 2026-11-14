@@ -1,0 +1,23 @@
+// ==UserScript==
+// @name         雨课堂刷课助手
+// @namespace    http://tampermonkey.net/
+// @version      3.6.2
+// @description  雨课堂课程学习助手：自动连播视频、音频和课件，支持倍速、静音与进度记录；可选开启 AI 作业答题、截图识题及讨论回复
+// @author       Mark
+// @license      GPL3
+// @match        *://*.yuketang.cn/*
+// @match        *://*.gdufemooc.cn/*
+// @run-at       document-start
+// @icon         http://yuketang.cn/favicon.ico
+// @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
+// @connect      api.deepseek.com
+// @connect      cn.bing.com
+// @connect      api.anthropic.com
+// @connect      *
+// @connect      cdn.jsdelivr.net
+// @connect      unpkg.com
+// @require      https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @require      https://unpkg.com/tesseract.js@v2.1.0/dist/tesseract.min.js
+// ==/UserScript==

@@ -1,0 +1,187 @@
+{
+  "name": "雨课堂刷课助手",
+  "version": "3.6.2",
+  "header": "userscript.header.txt",
+  "entry": "Y.boot();",
+  "source": "雨课堂刷课助手-3.1.32.js",
+  "sourceSha256": "c1d9134edbe5314a4a96dcb8002f85dc64e2ddf3d18cfef9e5eb15471fdd1839",
+  "modules": [
+    {
+      "file": "core/constants.js",
+      "title": "基础常量：默认播放设置、轨迹文案、完成阈值"
+    },
+    {
+      "file": "core/config.js",
+      "title": "运行期配置（Config）",
+      "loadAfter": [
+        "core/constants.js"
+      ]
+    },
+    {
+      "file": "utils/timing.js",
+      "title": "计时、轮询与后台节流"
+    },
+    {
+      "file": "utils/text.js",
+      "title": "文本解析与完成度文案判定"
+    },
+    {
+      "file": "utils/human-check.js",
+      "title": "安全核验检测与闸门"
+    },
+    {
+      "file": "utils/dom.js",
+      "title": "页面信息、挂载点与媒体时长"
+    },
+    {
+      "file": "utils/index.js",
+      "title": "工具集装配（Utils）",
+      "loadAfter": [
+        "utils/timing.js",
+        "utils/text.js",
+        "utils/human-check.js",
+        "utils/dom.js"
+      ]
+    },
+    {
+      "file": "storage/store.js",
+      "title": "localStorage 封装、配置读写与启动同步",
+      "loadAfter": [
+        "core/constants.js",
+        "core/config.js",
+        "utils/index.js"
+      ]
+    },
+    {
+      "file": "player/duration.js",
+      "title": "播放器时长状态与就绪判定"
+    },
+    {
+      "file": "player/controls.js",
+      "title": "倍速与静音控制"
+    },
+    {
+      "file": "player/observe.js",
+      "title": "播放过程中的倍速/静音校正"
+    },
+    {
+      "file": "player/index.js",
+      "title": "播放器装配（Player）",
+      "loadAfter": [
+        "player/duration.js",
+        "player/controls.js",
+        "player/observe.js"
+      ]
+    },
+    {
+      "file": "progress/ledger.js",
+      "title": "平台进度契约与观看区间算术"
+    },
+    {
+      "file": "progress/api.js",
+      "title": "平台进度接口层（YktApi）"
+    },
+    {
+      "file": "workspace/media.js",
+      "title": "学习空间路由与媒体元素定位"
+    },
+    {
+      "file": "workspace/dom.js",
+      "title": "学习空间侧栏、练习与讨论 DOM"
+    },
+    {
+      "file": "workspace/index.js",
+      "title": "学习空间装配（AiWorkspace）",
+      "loadAfter": [
+        "workspace/media.js",
+        "workspace/dom.js"
+      ]
+    },
+    {
+      "file": "panel/visibility.js",
+      "title": "面板全屏可见性兜底"
+    },
+    {
+      "file": "platform/screen-check.js",
+      "title": "原生事件注册与切屏拦截兼容层"
+    },
+    {
+      "file": "panel/markup.js",
+      "title": "面板静态模板（HTML/CSS）"
+    },
+    {
+      "file": "panel/panel.js",
+      "title": "面板实例状态与交互（createPanel）"
+    },
+    {
+      "file": "solver/question.js",
+      "title": "题目读取、字体还原与截图"
+    },
+    {
+      "file": "solver/ai.js",
+      "title": "检索、模型调用与选项提交"
+    },
+    {
+      "file": "solver/index.js",
+      "title": "答题装配（Solver）",
+      "loadAfter": [
+        "solver/question.js",
+        "solver/ai.js"
+      ]
+    },
+    {
+      "file": "runners/v2/media.js",
+      "title": "v2 视频、音频与批量区处理"
+    },
+    {
+      "file": "runners/v2/courseware.js",
+      "title": "v2 作业、课堂与课件处理"
+    },
+    {
+      "file": "runners/v2/runner.js",
+      "title": "v2 刷课主流程（V2Runner）",
+      "loadAfter": [
+        "runners/v2/media.js",
+        "runners/v2/courseware.js"
+      ]
+    },
+    {
+      "file": "runners/legacy.js",
+      "title": "pro/lms 旧版与新版流程"
+    },
+    {
+      "file": "runners/workspace/media.js",
+      "title": "学习空间媒体接管与返回"
+    },
+    {
+      "file": "runners/workspace/progress.js",
+      "title": "目录审计与平台记账查询"
+    },
+    {
+      "file": "runners/workspace/credit.js",
+      "title": "观看缺口补刷与记满"
+    },
+    {
+      "file": "runners/workspace/exercise.js",
+      "title": "练习与讨论处理"
+    },
+    {
+      "file": "runners/workspace/runner.js",
+      "title": "学习空间刷课主流程（AiWorkspaceRunner）",
+      "loadAfter": [
+        "runners/workspace/media.js",
+        "runners/workspace/progress.js",
+        "runners/workspace/credit.js",
+        "runners/workspace/exercise.js"
+      ]
+    },
+    {
+      "file": "app/router.js",
+      "title": "页面路由分发（start）"
+    },
+    {
+      "file": "app/bootstrap.js",
+      "title": "引导启动与面板挂载（boot）"
+    }
+  ]
+}

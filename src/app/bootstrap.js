@@ -1,0 +1,57 @@
+((Y) => {
+  // 引导启动与面板挂载（boot）
+
+  // ---- 启动 ----
+  async function boot() {
+    if (Y.Utils.inIframe()) return;
+    await Y.Utils.waitForMountTarget();
+    // 留一个「脚本真的跑起来了」的痕迹：面板看不见时，靠它一眼区分
+    // 「脚本没运行」和「运行了但面板被隐藏/被盖住」，不用再猜。
+    // 必须等 waitForMountTarget —— document-start 时 documentElement 往往还不存在，
+    // 早写会被可选链静默跳过（实测踩过）。
+    try {
+      document.documentElement?.setAttribute('data-ykt-helper', Y.Config.version);
+    } catch (_) {}
+    const mountPanel = () => {
+      Y.panel = Y.createPanel();
+      Y.panel.log(`雨课堂刷课助手 v${Y.Config.version} 已加载`);
+      Y.panel.setStartHandler(Y.start);
+      Y.installPanelVisibility(
+        () => Y.panel?.frame,
+        message => Y.panel?.log(message)
+      );
+      const pendingAutoStart = Y.Store.getPendingAutoStart();
+      const currentClassroomId = Y.Utils.getCurrentClassroomId();
+      if (
+        pendingAutoStart
+        && Y.Utils.isSupportedLearningPage()
+        && currentClassroomId
+        && pendingAutoStart.classroomId === currentClassroomId
+      ) {
+        Y.panel.log(`检测到跨页面跳转，自动恢复刷课：课堂 ${currentClassroomId}`);
+        setTimeout(() => Y.panel.start(), 1200);
+      }
+    };
+    try {
+      mountPanel();
+    } catch (err) {
+      console.error('面板初始化失败:', err);
+      // 文档没就绪 / 挂载点没出来时等 DOM 就绪再试一次；仍失败就留一条页面级提示
+      const retry = () => {
+        try {
+          mountPanel();
+        } catch (err2) {
+          console.error('面板初始化重试失败:', err2);
+          Y.showPanelFailureNotice(err2);
+        }
+      };
+      if (document.readyState === 'loading') {
+        Y.addNativeListener(document, 'DOMContentLoaded', retry, { once: true });
+      } else {
+        setTimeout(retry, 800);
+      }
+    }
+  }
+
+  Y.boot = boot;
+})(Y);
