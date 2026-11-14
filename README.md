@@ -314,8 +314,10 @@ v2 链路带 500 轮硬上限防死循环。大部分「不支持的类型」在
 
 1. 🧩 **装脚本管理器**：Tampermonkey（Chrome / Edge / Firefox 均可）。
 2. 📥 **导入脚本**：新建脚本 → 清空模板 → 粘贴构建产物 `雨课堂刷课助手-3.6.2.user.js` 全文 → `Ctrl+S` 保存。
-   > 产物在本地 `dist/`，由 `src/` 拼装生成（见 [§9 构建](#build)）。脚本头部已声明 `@require` 的 CDN 依赖，
-   > 首次加载需要能访问 `cdn.jsdelivr.net` / `cdnjs.cloudflare.com` / `unpkg.com`。
+   > 产物在本地 `dist/`，由 `src/` 拼装生成（见 [§9 构建](#build)）。也可以直接从
+   > [Releases](https://github.com/Mahiroa/crouse-auto/releases/latest) 下载现成的 `yuketang-helper-3.6.2.user.js`
+   > （GitHub 会剥离资产名里的非 ASCII 字符，所以发布件用 ASCII 文件名；内容与本地 `雨课堂刷课助手-3.6.2.user.js` 完全一致，SHA256 见发布页）。
+   > 脚本头部已声明 `@require` 的 CDN 依赖，首次加载需要能访问 `cdn.jsdelivr.net` / `cdnjs.cloudflare.com` / `unpkg.com`。
 3. 📚 **打开课程**：进到雨课堂的课程学习页，右上会出现「雨课堂刷课助手」面板（拖到顺手的位置，位置会记住）。
 4. ⚙️ **按需配置**：点「设置」→ 填 AI 接口（要答题才需要）、选倍速 / 静音、选人机验证策略 →「保存并关闭」。
 5. ▶️ **点「开始刷课」**：进到课程页后点一次即可，后续跨页跳转由脚本自己续上。
