@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.6.8
+// @version      3.7.1
 // @description  雨课堂课程学习助手：自动连播视频、音频和课件，支持倍速、静音与进度记录；可选开启 AI 作业答题、截图识题及讨论回复
 // @author       Mark
 // @license      GPL3

@@ -102,6 +102,14 @@
         model: saved.model ?? "deepseek-flash",
         apiFormat: saved.apiFormat ?? "openai", // openai 或 anthropic
         authMethod: saved.authMethod ?? "bearer", // bearer 或 x-api-key
+        // 思考档位：off / low / high / max。默认 low（推荐）：答题只要一行答案，
+        // 预算 512 大约 3~5 秒；不控档位时模型会自己想到 6k~9k token，一题卡好几分钟。
+        thinkingEffort: ['off', 'low', 'high', 'max'].includes(saved.thinkingEffort)
+          ? saved.thinkingEffort
+          : 'low',
+        // 自定义 User-Agent：多台设备/多个脚本共用一个网关时，靠它区分请求来源。
+        // 默认值是「雨课堂刷课助手」的英文名；存空串表示不覆盖，走篡改猴默认 UA。
+        userAgent: typeof saved.userAgent === 'string' ? saved.userAgent.trim() : 'Yuketang Course Helper',
       };
       const retiredModels = {
         'deepseek-chat': 'deepseek-flash',

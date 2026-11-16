@@ -814,6 +814,22 @@
                   <option value="x-api-key">X-API-Key</option>
                 </select>
               </label>
+              <div class="grid2">
+                <label class="field">
+                  <span class="field-label">思考档位</span>
+                  <select id="ai_thinking">
+                    <option value="off">Off（不思考，最快）</option>
+                    <option value="low">Low（推荐）</option>
+                    <option value="high">High（更准，慢）</option>
+                    <option value="max">Max（最慢）</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">自定义 UA</span>
+                  <input type="text" id="ai_ua" placeholder="Yuketang Course Helper" spellcheck="false">
+                </label>
+              </div>
+              <p class="hint">答题只需要一行答案：<b>Off / Low</b> 明显更快；档位越高模型想得越久。自定义 UA 只作用于模型请求，方便在网关侧区分请求来源。</p>
               <div id="ai_test_result" class="test-result" role="status"></div>
             </section>
             <p class="note">配置只保存在本机浏览器；答题前可以先点「测试连接」。切换分页不会丢失未保存的修改，记得点「保存并关闭」。</p>

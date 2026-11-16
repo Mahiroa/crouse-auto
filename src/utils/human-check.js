@@ -138,50 +138,130 @@
       { match: /道已作答习题未提交|需要一起提交吗/, accept: /^帮我提交$/, cancel: /仅提交本题|回到作业/, note: '多题待提交' },
       { match: /有填空未填写/, accept: /^(确定|确认|提交)$/, cancel: /取消/, note: '有空白没填' }
     ],
-    // 弹窗在自己的面板（iframe）之外，可能在主文档，也可能在作业 iframe 里
+    // 弹窗可能在顶层文档，也可能在作业 iframe 里；这里把所有同源文档都收进来
     dialogDocs() {
       const docs = [document];
+      const push = root => {
+        let frames = [];
+        try {
+          frames = [...root.querySelectorAll('iframe')];
+        } catch (_) {
+          frames = [];
+        }
+        for (const frame of frames) {
+          if (frame.id === 'ykt-helper-iframe') continue;
+          let inner = null;
+          try {
+            inner = frame.contentDocument;
+          } catch (_) {
+            continue;
+          }
+          if (!inner?.body || docs.includes(inner)) continue;
+          docs.push(inner);
+          if (docs.length < 8) push(inner);
+        }
+      };
+      push(document);
       try {
         const exerciseDoc = Y.AiWorkspace?.getExerciseDocument?.();
-        if (exerciseDoc && exerciseDoc !== document) docs.push(exerciseDoc);
+        if (exerciseDoc?.body && !docs.includes(exerciseDoc)) docs.push(exerciseDoc);
       } catch (_) {}
       return docs.filter(doc => doc && doc.body);
     },
-    // 弹窗按钮：先按真机可见性过滤；jsdom / 无布局环境里 getBoundingClientRect 恒为 0，
-    // 全被判不可见时退回「文本匹配即算」——否则回归台里永远识别不到弹窗按钮。
-    dialogCandidates(root) {
-      const all = [...root.querySelectorAll('button, .el-button, [role="button"], a, span')]
-        .filter(el => {
-          const text = (el.innerText ?? el.textContent ?? '').replace(/\s+/g, '');
-          return Boolean(text) && text.length <= 8;
-        });
-      let visible = [];
-      try {
-        visible = all.filter(el => {
-          if (Y.AiWorkspace?.isVisibleElement?.(el) === false) return false;
-          const rect = el.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        });
-      } catch (_) {}
-      return visible.length ? visible : all;
+    dialogButtonText(el) {
+      return String(el.innerText ?? el.textContent ?? '').replace(/\s+/g, '');
     },
-    // 只在弹窗容器里找文案，避免把课程正文/题目里的同名字段当成弹窗
+    // 在弹窗容器里找按钮：外层行容器的文本是「先不用了帮我提交」（两段拼一起），
+    // 直接对容器做正则匹配会把整行当成按钮，所以优先取最内层的那个元素。
+    findDialogButton(root, pattern) {
+      const candidates = [...root.querySelectorAll('button, [role="button"], .el-button, a, span, div')]
+        .filter(el => {
+          const label = this.dialogButtonText(el);
+          if (!label || label.length > 8) return false;
+          if (!pattern.test(label)) return false;
+          return this.isDialogNodeVisible(el);
+        });
+      return candidates.find(el => el.childElementCount === 0)
+        || candidates.find(el => el.tagName === 'BUTTON' || el.getAttribute('role') === 'button')
+        || candidates[0]
+        || null;
+    },
+    isDialogNodeVisible(el) {      try {
+        if (Y.AiWorkspace?.isVisibleElement?.(el) === false) return false;
+      } catch (_) {}
+      let rect = null;
+      try {
+        rect = el.getBoundingClientRect();
+      } catch (_) {}
+      // jsdom / 无布局环境下 rect 恒为 0：只按「有尺寸才算可见」会把回归台全判不可见
+      if (!rect || (!rect.width && !rect.height)) return true;
+      return rect.width > 0 && rect.height > 0;
+    },
+    // 真机实测（3.6.8）：这个确认弹窗**不是** el-dialog，只是一个白卡片 + 两个按钮，
+    // 按 class 找永远找不到，所以改成按文案找：先在文本节点里命中平台原文，
+    // 再向上最多 8 层找「同层有『帮我提交』按钮」的容器，全程不依赖任何 class 名。
     pendingSubmitDialog() {
       for (const doc of this.dialogDocs()) {
-        const roots = doc.querySelectorAll('.el-message-box, .el-dialog, [role="dialog"], [class*="message-box"], [class*="msgbox"], [class*="dialog"], [class*="modal"]');
-        for (const root of roots) {
-          const text = String(root.innerText || root.textContent || '').replace(/\s+/g, ' ').trim();
-          if (!text || text.length > 200) continue;
-          const rule = this.submitDialogRules.find(item => item.match.test(text));
-          if (!rule) continue;
-          const buttons = this.dialogCandidates(root);
-          const accept = buttons.find(btn => rule.accept.test((btn.innerText ?? btn.textContent ?? '').replace(/\s+/g, '')));
-          if (!accept) continue;
-          const cancel = buttons.find(btn => rule.cancel?.test((btn.innerText ?? btn.textContent ?? '').replace(/\s+/g, '')));
-          return { root, accept, cancel, rule, text: text.slice(0, 60) };
+        const body = doc.body;
+        if (!body) continue;
+        const walker = doc.createTreeWalker ? doc.createTreeWalker(body, 4 /* NodeFilter.SHOW_TEXT */) : null;
+        if (!walker) continue;
+        let textNode = null;
+        let rule = null;
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          const value = String(node.nodeValue || '').trim();
+          if (!value || value.length > 120) continue;
+          rule = this.submitDialogRules.find(item => item.match.test(value));
+          if (!rule) {
+            // 文案可能被插值拆成多个文本节点：再看一眼父级的整段文字
+            const parent = node.parentElement;
+            const merged = parent ? String(parent.textContent || '') : '';
+            if (merged.length <= 160 && merged.length > value.length) {
+              rule = this.submitDialogRules.find(item => item.match.test(merged));
+            }
+          }
+          if (rule) {
+            textNode = node;
+            break;
+          }
+        }
+        if (!textNode || !rule) continue;
+        let root = textNode.parentElement;
+        for (let depth = 0; depth < 8 && root; depth++) {
+          const accept = this.findDialogButton(root, rule.accept);
+          if (accept) {
+            const cancel = this.findDialogButton(root, rule.cancel);
+            return { root, accept, cancel, rule, text: String(root.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60) };
+          }
+          root = root.parentElement;
+        }
+        // 文案出现了但找不到按钮：留一条明确日志，省得下次只能靠猜
+        if (rule && !this._submitDialogOrphanLogged) {
+          this._submitDialogOrphanLogged = true;
+          Y.panel?.log(`检测到平台提示「${rule.note}」，但没找到可点的按钮（可能被遮罩/动画挡住）`);
         }
       }
       return null;
+    },
+    // 弹窗会在「脚本正等 AI 接口」的时候弹出来：只有 poll / humanClick 的闸门会漏掉那一段，
+    // 期间面板看起来就是「什么都没发生」，弹窗一直挂着。这里挂一个低频看门狗专盯它。
+    // 只处理提交确认弹窗（幂等、无副作用）；安全核验仍然只走主流程的闸门，避免两处同时拖。
+    startWatchdog(interval = 1500) {
+      if (this._watchdogTimer) return;
+      try {
+        this._watchdogTimer = setInterval(() => {
+          try {
+            this.handleSubmitDialog();
+          } catch (_) {}
+        }, interval);
+      } catch (_) {}
+    },
+    stopWatchdog() {
+      try {
+        clearInterval(this._watchdogTimer);
+      } catch (_) {}
+      this._watchdogTimer = null;
     },
     // 幂等：同一时刻只让一个调用方去点，避免 poll 与 humanClick 各点一次
     async handleSubmitDialog() {

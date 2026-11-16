@@ -20,7 +20,7 @@
       return [...new Set(budgets)];
     },
     // 升档重试时追加到用户消息末尾的约束：模型上一轮就是写太多才被截断的
-    answerRetryHint: '\n（上一次回复太长被截断了。这次只输出一行，格式必须是「答案：xxx」，不要任何推导、复述或解释。）',
+    answerRetryHint: '\n（上次输出被截断。这次只输出一行「答案：xxx」，不要推导和解释。）',
     appendHint(userContent, hint) {
       if (!hint) return userContent;
       if (Array.isArray(userContent)) {
@@ -43,6 +43,45 @@
       if (value.length > 30 || /[。；;：:]$/.test(value)) return '';
       return `答案：${value}`;
     },
+    // 思考档位 → 请求参数。各家网关认的字段名不一样（OpenAI 的 reasoning_effort、
+    // Anthropic/DeepSeek 的 thinking、Qwen 系的 enable_thinking），所以一次给全；
+    // 网关认哪个用哪个，遇到「参数不认识」的 400 会自动降级成不带这些参数（见 requestChat）。
+    thinkingEffortOf(conf) {
+      const saved = String(conf?.thinkingEffort || '').toLowerCase();
+      return ['off', 'low', 'high', 'max'].includes(saved) ? saved : 'high';
+    },
+    thinkingParams(effort, apiFormat, isAnthropic) {
+      const level = ['off', 'low', 'high', 'max'].includes(effort) ? effort : 'high';
+      const budget = level === 'low' ? 512 : level === 'high' ? 2048 : 8192;
+      const params = {};
+      if (level === 'off') {
+        // Off：三套字段都压掉。reasoning_effort:'none' 是新版 OpenAI 兼容网关的写法，
+        // enable_thinking:false 是 Qwen/GLM 系的写法，thinking.disabled 是 Anthropic/DeepSeek 的写法。
+        if (isAnthropic) params.thinking = { type: 'disabled' };
+        else {
+          params.reasoning_effort = 'none';
+          params.thinking = { type: 'disabled' };
+          params.enable_thinking = false;
+        }
+        return params;
+      }
+      if (isAnthropic) {
+        params.thinking = { type: 'enabled', budget_tokens: budget };
+        return params;
+      }
+      // max 在多数网关上没有独立取值，用 high + 更大的 budget_tokens 表达
+      params.reasoning_effort = level === 'max' ? 'high' : level;
+      params.thinking = { type: 'enabled', budget_tokens: budget };
+      if (apiFormat !== 'anthropic') params.enable_thinking = true;
+      return params;
+    },
+    // 自定义 UA：多台设备/多个脚本共用一个网关时靠它区分请求来源。
+    // 只作用于模型请求，且必须是 latin1 可见字符，否则篡改猴会拒发。
+    requestUserAgent(conf) {
+      const raw = String(conf?.userAgent || '').replace(/[\r\n]+/g, ' ').trim();
+      if (!raw) return '';
+      return raw.replace(/[^\x20-\x7E]/g, '').slice(0, 200);
+    },
     // 单次请求：只负责发一次 HTTP，把正文 / 推理内容 / 是否被截断原样交回 requestChat。
     // 拆出来是为了「截断就升预算再来一次」不必把这段 HTTP 逻辑复制两遍。
     postChat(url, headers, body, apiFormat = 'openai') {
@@ -56,6 +95,14 @@
           onload: res => {
             if (res.status !== 200) {
               const bodyText = String(res.responseText || (typeof res.response === 'string' ? res.response : '') || '').trim();
+              // 「接口不认这几个参数」单独识别：requestChat 会去掉思考档位参数重试一次，
+              // 而不是把整道题判失败（不同网关支持的字段名不一样）。
+              if (res.status === 400 && /reasoning_effort|thinking|enable_thinking|budget_tokens|unknown|unsupported|invalid[\s_-]*(param|field|argument)/i.test(bodyText)) {
+                const paramErr = new Error(`接口不接受思考档位参数：${bodyText.slice(0, 160)}`);
+                paramErr.unsupportedParam = true;
+                reject(paramErr);
+                return;
+              }
               const err = (res.status === 404 && !bodyText)
                 ? `请求被篡改猴拦截。请确认脚本头部允许访问该域名，并在篡改猴里放行。当前地址：${url}`
                 : `请求失败: HTTP ${res.status} - ${bodyText.slice(0, 180)}`;
@@ -121,6 +168,9 @@
         ? { 'x-api-key': API_KEY }
         : { 'Authorization': `Bearer ${API_KEY}` };
       const headers = { 'Content-Type': 'application/json', ...authHeader };
+      // 自定义 UA 只加在模型请求上（想区分请求来源时用），空串则沿用篡改猴默认 UA
+      const customUA = this.requestUserAgent(saved);
+      if (customUA) headers['User-Agent'] = customUA;
       const imageList = Array.isArray(images) ? images.filter(Boolean) : [];
       // 截图识题也走 DeepSeek：OpenAI 格式用 image_url，Anthropic 格式用 base64 image block
       const parseDataUrl = value => {
@@ -170,16 +220,29 @@
             temperature: 0.1,
             max_tokens: budget
           };
-        // 两套 Anthropic 兼容协议的关闭思考参数不同，不能互相套用。
-        // 第三方兼容服务不擅自加参数，由下方「只采用正式正文」的逻辑兜底。
-        if (API_FORMAT === 'anthropic') {
-          if (isDeepSeek) body.reasoning = { effort: 'none' };
-          else if (isAnthropic) body.thinking = { type: 'disabled' };
-        } else if (isDeepSeek) {
-          body.thinking = { type: 'disabled' };
+        // 思考档位：面板里选的 Off / Low / High / Max 直接写进请求。
+        // 关掉思考（或调低档位）是填空题提速的关键：不控档位时模型会自己想到 6k~9k token，
+        // 一题等好几分钟。网关不认这些字段时，下面 catch 到 400 会置 _thinkingParamMode='plain'
+        // 并自动重试一次，不会把整道题判失败。
+        if (this._thinkingParamMode !== 'plain') {
+          const effort = this.thinkingEffortOf(saved);
+          const extra = this.thinkingParams(effort, API_FORMAT, isAnthropic);
+          Object.assign(body, extra);
         }
         if (i > 0) Y.panel.log(`模型上一轮输出被截断，改用 max_tokens=${budget} 重试`);
-        const reply = await this.postChat(API_URL, headers, body, API_FORMAT);
+        let reply;
+        try {
+          reply = await this.postChat(API_URL, headers, body, API_FORMAT);
+        } catch (err) {
+          if (err?.unsupportedParam && this._thinkingParamMode !== 'plain') {
+            this._thinkingParamMode = 'plain';
+            Y.panel.log('接口不认思考档位参数，已改为不带该参数重试（本次会话生效）');
+            // 用同一个预算重来一次，不要白白升一档（升档是给「输出被截断」用的）
+            i -= 1;
+            continue;
+          }
+          throw err;
+        }
         tried.push(budget);
         if (reply.text && !reply.truncated) return reply.text;
         if (!reply.truncated) {
@@ -199,7 +262,10 @@
       throw lastReason || '模型没有返回可用答案';
     },
     ping(conf) {
-      return this.requestChat('只回复两个字：成功', '你是连接测试助手，只按用户要求回复。', conf, 64);
+      // 连接测试只验证「能不能通」：强制 off 档 + 32 token，避免点一下测试要等半分钟，
+      // 也避免模型在测试请求里顺手想几百个 token。
+      const base = this.normalizeConf(conf || Y.Store.getAIConf());
+      return this.requestChat('回复：成功', '只回复用户要求的字，不要解释。', { ...base, thinkingEffort: 'off' }, 32);
     },
     httpGet(url) {
       return new Promise((resolve, reject) => {
@@ -240,7 +306,8 @@
         snippets.push(text.slice(0, 240));
       });
       snippets.sort((a, b) => Number(/答案|正确/.test(b)) - Number(/答案|正确/.test(a)));
-      return snippets.slice(0, 5);
+      // 检索结果整段都会进提示词：3 条 × 160 字足够模型对照，再多只是多花 token
+      return snippets.slice(0, 3).map(text => text.slice(0, 160));
     },
     async searchQuestion(questionText) {
       const query = this.searchQuery(questionText);
@@ -546,19 +613,20 @@
       if (questionType === 'fill') return '填空题';
       return '单选题';
     },
+    // 这段约束每道题都会随请求发一次，多一行字就是每道题多付一次输入 token；
+    // 只保留「题型 + 输出格式」，其余交给系统提示兜底。
     questionTypeRule(questionType, optionCount) {
       if (questionType === 'fill') {
         const blanks = Number(optionCount) > 0 ? Number(optionCount) : 1;
-        return `这是填空题，共有 ${blanks} 个空。只输出答案本身，不要解释、不要加引号、不要写解析。`
-          + (blanks > 1
-            ? `按题目里空格出现的顺序用 | 分隔，例如：答案：市场|社会`
-            : '例如：答案：市场。答案字数按题目括号里的提示（如「两个字」）执行。');
+        return blanks > 1
+          ? `填空题（${blanks} 个空）：只输出答案，多空按顺序用 | 分隔，如「答案：市场|社会」。`
+          : '填空题：只输出答案，如「答案：市场」，字数按括号提示。';
       }
       const maxChar = String.fromCharCode(65 + Math.max(optionCount, 1) - 1);
       const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
-      if (questionType === 'multiple') return `这是多选题，有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}。少选不得分，每个正确选项都要选上，字母连写，例如 ABCD。`;
-      if (questionType === 'judge') return '这是判断题。只能输出“对”或“错”，不要输出字母。';
-      return `这是单选题，有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}。只能选择一个选项，正确答案只能有一个字母。`;
+      if (questionType === 'multiple') return `多选题（${optionCount || '若干'} 项，A-${maxChar}）：少选不得分，字母连写，如「答案：ABCD」。`;
+      if (questionType === 'judge') return '判断题：只输出「对」或「错」，如「答案：对」。';
+      return `单选题（${optionCount || '若干'} 项，${rangeStr}）：只输出一个字母，如「答案：A」。`;
     },
     async waitBeforeSearch(prefix) {
       if (Y.Utils.isFastMode()) {
@@ -571,10 +639,8 @@
     },
     // 系统提示按题型切换：填空题要的是「答案文本」，不是字母
     answerSystemPrompt(questionType) {
-      if (questionType === 'fill') {
-        return '你是做题助手，只输出填空答案本身；多个空按顺序用 | 分隔。不要解释、不要引号、不要写解析、不要复述题目。';
-      }
-      return "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。搜索结果只在与本题一致时才采用。";
+      if (questionType === 'fill') return '只输出填空答案；多空用 | 分隔。不要解释、不要引号、不要解析。';
+      return '只输出答案：选择题写字母（多选连写），判断题写对/错。不要解释。';
     },
     async askAI(questionText, optionCount = 0, image = '', questionType = 'single', element = null) {
       const answerConf = this.answerConf();
@@ -608,31 +674,17 @@
         await this.waitBeforeSearch('复述已写在上方题目卡片');
         const evidence = await this.searchQuestion(restated);
         Y.panel.log(evidence ? '正在根据复述和搜索结果作答...' : '没有搜到结果，改由模型根据复述作答...');
-        const prompt = `
-你是专业做题助手。下面题目是模型从截图复述的，搜索结果只在明确对应这道题时采用。
-强约束：
-1) ${this.questionTypeRule(questionType, optionCount)}
-2) 按复述中选项出现顺序映射 A/B/C/D...
-3) 输出格式必须包含“正确答案：”前缀，例如 正确答案：A 或 正确答案：ABD 或 正确答案：对
-题目内容：
-${restated}
-${evidence ? `搜索结果：\n${evidence}` : ''}
-`;
+        const prompt = `题目：\n${restated}
+${evidence ? `搜索参考：\n${evidence}\n` : ''}${this.questionTypeRule(questionType, optionCount)}
+搜索能对上就用它，对不上按题目判断。只输出「答案：…」，不要解释。`;
         return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf, this.ANSWER_MAX_TOKENS);
       }
       Y.panel.showQuestion(questionText);
       await this.waitBeforeSearch('还原后的题目已写在上方卡片');
       const evidence = await this.searchQuestion(questionText);
-      const prompt = `
-你是专业做题助手。先看搜索结果是否就是这道题，再看页面上的选项。
-强约束：
-1) 搜索结果明确对应本题时，采用其中的答案；结果是别的题、互相矛盾或没有答案时，再根据题目判断
-2) ${this.questionTypeRule(questionType, optionCount)}
-3) 按选项出现顺序映射 A/B/C/D...
-4) 输出格式必须包含“正确答案：”前缀，例如 正确答案：A 或 正确答案：ABD 或 正确答案：对
-${evidence ? `搜索结果：\n${evidence}\n` : ''}题目内容：
-${questionText}
-`;
+      const prompt = `题目：\n${questionText}
+${evidence ? `搜索参考：\n${evidence}\n` : ''}${this.questionTypeRule(questionType, optionCount)}
+搜索能对上就用它，对不上按题目判断。只输出「答案：…」，不要解释。`;
       return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf, this.ANSWER_MAX_TOKENS);
     },
     // 从模型正文里提取答案 token（字母串 / 对 / 错）。autoSelectAndSubmit 与答案缓存共用它：

@@ -59,6 +59,8 @@
       aiModelInput: doc.getElementById('ai_model'),
       aiFormatSelect: doc.getElementById('ai_format'),
       authMethodSelect: doc.getElementById('auth_method'),
+      aiThinkingSelect: doc.getElementById('ai_thinking'),
+      aiUaInput: doc.getElementById('ai_ua'),
       toggleKey: doc.getElementById('toggle_key'),
       featureAutoAI: doc.getElementById('feature_auto_ai'),
       featureAutoComment: doc.getElementById('feature_auto_comment'),
@@ -329,7 +331,7 @@
     };
 
     // ---- 设置读取 / 快捷条 ----
-    const defaultAI = { url: 'https://api.deepseek.com/chat/completions', key: 'sk-xxxxxxx', model: 'deepseek-flash', apiFormat: 'openai', authMethod: 'bearer' };
+    const defaultAI = { url: 'https://api.deepseek.com/chat/completions', key: 'sk-xxxxxxx', model: 'deepseek-flash', apiFormat: 'openai', authMethod: 'bearer', thinkingEffort: 'low', userAgent: 'Yuketang Course Helper' };
     const SPEED_STEPS = [1, 1.25, 1.5, 2, 2.5, 3];
     const formatRate = rate => {
       const value = Number(rate);
@@ -354,6 +356,8 @@
       ui.aiModelInput.value = saved.model || defaultAI.model;
       ui.aiFormatSelect.value = saved.apiFormat || defaultAI.apiFormat;
       ui.authMethodSelect.value = saved.authMethod || defaultAI.authMethod;
+      if (ui.aiThinkingSelect) ui.aiThinkingSelect.value = saved.thinkingEffort || defaultAI.thinkingEffort;
+      if (ui.aiUaInput) ui.aiUaInput.value = saved.userAgent || defaultAI.userAgent;
     };
     const loadFeatureConf = () => {
       const saved = Y.Store.getFeatureConf();
@@ -450,7 +454,9 @@
       key: ui.aiKeyInput.value.trim(),
       model: ui.aiModelInput.value.trim(),
       apiFormat: ui.aiFormatSelect.value,
-      authMethod: ui.authMethodSelect.value
+      authMethod: ui.authMethodSelect.value,
+      thinkingEffort: ui.aiThinkingSelect?.value || defaultAI.thinkingEffort,
+      userAgent: String(ui.aiUaInput?.value || '').trim()
     });
     ui.toggleKey.addEventListener('click', () => {
       const visible = ui.aiKeyInput.type === 'text';
