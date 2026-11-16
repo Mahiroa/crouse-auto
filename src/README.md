@@ -75,9 +75,9 @@ src/
 | `utils/dom.js` | 页面信息、挂载点与媒体时长 | 对象分片 | `inIframe`/课堂 ID/回跳地址/挂载点等待/`getDDL`/`dismissPopups` | `UtilsDom` |
 | `utils/index.js` | 工具集装配（Utils） | 装配（spread） | 四片合成 `Y.Utils` | `Utils` |
 | `storage/store.js` | localStorage 封装、配置读写与启动同步 | 整语句 | `storeSafe`（异常兜底）+ `Store`（进度、AI、倍速、功能开关、跨页恢复、轨迹、面板位置）；加载期回写 `Y.Config.playbackRate` | `storeSafe`、`Store` |
-| `player/duration.js` | 播放器时长状态与就绪判定 | 整语句 + 对象分片 | `WeakMap` 记时长稳定 tick；`isDurationStable`/`isNearEnd`/`isDisplayFinished` | `mediaDurationState`、`PlayerDuration` |
-| `player/controls.js` | 倍速与静音控制 | 对象分片 | 先点 `xt-speedbutton`/`xt-volumebutton`，再兜底改 media 属性并反复校正 | `PlayerControls` |
-| `player/observe.js` | 播放过程中的倍速/静音校正 | 对象分片 | `observePause`：暂停就拉回、倍速被改就重设，返回解绑函数 | `PlayerObserve` |
+| `player/duration.js` | 播放器时长状态与就绪判定 | 整语句 + 对象分片 | `WeakMap` 记时长稳定 tick；`isDurationStable`/`isNearEnd`/`isDisplayFinished`；`RESUME_DELAY`（可见页延后续播）/`QUICK_RESUME_GAP`（隐藏页直连续播去抖） | `mediaDurationState`、`PlayerDuration` |
+| `player/controls.js` | 倍速与静音控制 | 对象分片 | 先点 `xt-speedbutton`/`xt-volumebutton`，再兜底改 media 属性并反复校正；`ensureBackgroundPlayback` 打掉 Blink 的 `was_always_muted_` 闩锁（最小化后不被浏览器按 video-only 暂停，全程 0 音量） | `PlayerControls` |
+| `player/observe.js` | 播放过程中的倍速/静音校正 | 对象分片 | `observePause`：暂停就拉回、倍速被改就重设；页面不可见时走 `pause`/`visibilitychange` 事件直连续播（不等会被节流的定时器），返回解绑函数 | `PlayerObserve` |
 | `player/index.js` | 播放器装配（Player） | 装配（spread） | 三片合成 `Y.Player` | `Player` |
 | `progress/ledger.js` | 平台进度契约与观看区间算术 | 整语句 | 叶子类型文案；`VideoLedger`：`rate` = 已观看区间并集、缺口并集、`MIN_GAP` | `LEAF_KIND`、`VideoLedger` |
 | `progress/api.js` | 平台进度接口层（YktApi） | 整语句 | 目录/单节进度/视频 rate/观看日志；TTL 缓存、失败计数、自建请求头（`university-id`/`uv-id`/`x-csrftoken`） | `YktApi` |

@@ -6,6 +6,10 @@
 
   const PlayerDuration = {
     RESUME_DELAY: 15000,
+    // 页面不可见（窗口最小化 / 切到别的标签页）时的续播去抖间隔。
+    // 隐藏页里的定时器会被浏览器节流到 1 秒甚至 1 分钟一次，等不到 15 秒的延后续播，
+    // 所以隐藏状态改走「pause 事件直连 + 立即 play()」，这个值只用来防止站点反复 pause 时打成死循环。
+    QUICK_RESUME_GAP: 2000,
     DURATION_STABLE_TICKS: 3,
     noteDuration(media) {
       if (!media) return false;

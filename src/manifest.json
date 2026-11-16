@@ -1,6 +1,6 @@
 {
   "name": "雨课堂刷课助手",
-  "version": "3.8.1",
+  "version": "3.8.2",
   "header": "userscript.header.txt",
   "entry": "Y.boot();",
   "source": "雨课堂刷课助手-3.1.32.js",

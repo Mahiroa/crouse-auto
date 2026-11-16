@@ -21,6 +21,21 @@
     muteDrift: new WeakMap(),
     muteLocks: new WeakSet(),
     volumeBeforeMute: new WeakMap(),
+    // ---- 后台播放解锁：窗口最小化后不被 Chrome 当「video-only」暂停 ----
+    // 触发链在 Chromium 的 WebMediaPlayerImpl::ShouldPausePlaybackWhenHidden()：
+    //   页面隐藏（最小化 / 切走）→ preserve_audio 为 false 就直接 Pause(kPageHidden)，
+    //   控制台里那条 AbortError 就是 “video-only background media was paused to save power”。
+    // 其中 preserve_audio = HasUnmutedAudio() = HasAudio() && !WasAlwaysMuted()，
+    // 而 Blink 的 was_always_muted_ 是一次性闩锁（html_media_element.cc::UpdatePlayState）：
+    // 元素只要在「正在播放 + muted 为 false」时过一遍 UpdatePlayState 就永久变 false，
+    // 之后就算重新静音，Chrome 仍按「有未静音音频」放行后台播放。
+    // 脚本默认静音，元素从加载起就没解过静音 → 最小化后就被浏览器按 video-only 停掉，
+    // 用户看到的就是「窗口最小化一会儿视频自己暂停」（偶发：取决于最小化时长与播放器状态）。
+    // 修法：接管播放器时先 muted=false + volume=0 播一下把闩锁打掉，拿到 playing/timeupdate
+    // 后再恢复用户的静音设置。全程音量为 0 —— 人听不到；Chrome 自动播放判定用的是
+    // EffectiveMediaVolume()，0 视作静音，所以也不会触发「未静音要用户手势」的拦截。
+    backgroundUnlockTried: new WeakSet(),
+    backgroundLatchPending: new WeakSet(),
     getPlayerWrap(media) {
       if (!media) return null;
       const closest = media.closest?.('xt-wrap, xt-video-player');
@@ -208,8 +223,97 @@
       if (/静音|关闭声音|^mute$/i.test(label)) return false;
       return null;
     },
+    // 打掉 Blink 的「从未解除静音」闩锁（细节见文件顶部 backgroundUnlockTried 的注释）。
+    // 只在媒体真的在播时动手：暂停中的元素 play() 可能被拦或把结尾状态打乱，
+    // 而 observePause / keepAlive 的校正循环 0.8~1.4 秒一轮，播放起来后自然会再进来。
+    ensureBackgroundPlayback(media) {
+      if (!media || this.backgroundUnlockTried.has(media)) return;
+      let conf = null;
+      try {
+        conf = Y.Store.getPlaybackConf();
+      } catch (_) {}
+      // 用户本来就没静音：元素真的放过声音，闩锁早就落了，不用折腾
+      if (conf && conf.muted === false) {
+        this.backgroundUnlockTried.add(media);
+        return;
+      }
+      if (media.paused || media.ended) return;
+      // 还没拿到媒体元数据时 play() 过不了 Blink 的 should_be_playing，闩锁落不下来；
+      // 这种情况不记「已尝试」，等 readyState 上来后（enforce 循环下一轮）再补
+      if (Number(media.readyState || 0) < 2) return;
+      this.backgroundUnlockTried.add(media);
+      this.backgroundLatchPending.add(media);
+      let timer = null;
+      const finish = () => {
+        if (!this.backgroundLatchPending.has(media)) return;
+        this.backgroundLatchPending.delete(media);
+        try {
+          media.removeEventListener('playing', finish);
+          media.removeEventListener('timeupdate', finish);
+          media.removeEventListener('pause', finish);
+          media.removeEventListener('ended', finish);
+        } catch (_) {}
+        if (timer) clearTimeout(timer);
+        // 闩锁落下后立刻把静音还回去：声音开关始终按用户设置，后台不暂停才是这次改动的目的
+        let muted = true;
+        try {
+          muted = Y.Store.getPlaybackConf().muted !== false;
+        } catch (_) {}
+        try {
+          this.applyMuteTo(media, muted);
+        } catch (_) {}
+      };
+      try {
+        // 静音锁会把 muted/volume 劫持成常量，先解开才能写进去（finish 里按需重新上锁）。
+        // 这里不用 unlockMute()：它会先把音量恢复到静音前的值，等于让视频响一下；
+        // 只摘掉访问器，音量马上被下面写成 0
+        if (this.muteLocks.has(media)) {
+          this.muteLocks.delete(media);
+          this.muteDrift.delete(media);
+          delete media.muted;
+          delete media.volume;
+        }
+        // 闩锁窗口会先把音量压到 0，这里必须替 applyMuteTo 把「静音前的音量」记下来，
+        // 否则面板里把静音关掉时没有可恢复的值，会变成「未静音但没声音」
+        if (!this.volumeBeforeMute.has(media) && Number(media.volume) > 0) {
+          this.volumeBeforeMute.set(media, Number(media.volume));
+        }
+        // 顺序要紧：先 volume=0 再 muted=false。反过来的话 Chrome 的 setMuted(false) 会看到
+        // 非 0 的有效音量，去要用户的「未静音授权」，被拒就直接 pause() —— 修复反而把视频停了
+        media.volume = 0;
+        media.muted = false;
+      } catch (_) {}
+      try {
+        media.addEventListener('playing', finish);
+        media.addEventListener('timeupdate', finish);
+        // 闩锁窗口里被暂停/播完，就没必要继续挂着「未静音」：提前把静音还回去
+        media.addEventListener('pause', finish);
+        media.addEventListener('ended', finish);
+      } catch (_) {}
+      try {
+        // play() 内部会跑一遍 UpdatePlayState，闩锁就在那一瞬间落下
+        const playing = media.play();
+        if (playing && typeof playing.catch === 'function') playing.catch(() => {});
+      } catch (_) {}
+      // 兜底：一直没 playing/timeupdate 也要把静音还回去，绝不能让元素永远停在「未静音」
+      timer = setTimeout(finish, 8000);
+    },
     applyMuteTo(media, muted = true) {
       if (!media) return;
+      // 已经播完的媒体不再写 muted/volume：真实浏览器里这只是无意义的写入，
+      // 而「播完再改音量」在某些播放器桩/接管逻辑里会被当成「重新开播」，
+      // 把 ended 状态打掉（回归台 slow-swap 就是这样被打乱的）。
+      // 元素被复用播下一节时，applySettings 会重新套一遍设置。
+      if (media.ended) return;
+      // 闩锁窗口内保持「muted=false + volume=0」：对人是静音，对 Chrome 是「有未静音音频」
+      if (this.backgroundLatchPending.has(media)) {
+        try {
+          // 同 ensureBackgroundPlayback：先把音量压到 0，再保持未静音，避免触发「未静音授权」
+          if (Number(media.volume) !== 0) media.volume = 0;
+          if (media.muted) media.muted = false;
+        } catch (_) {}
+        return;
+      }
       const icon = this.getMuteControl(media);
       const nativeMuted = this.isNativeMuted(icon);
       if (icon && nativeMuted === muted) this.muteClickAttempts.delete(media);
@@ -296,6 +400,8 @@
       if (!media) return;
       const conf = Y.Store.getPlaybackConf();
       this.applySpeedTo(media, conf.playbackRate);
+      // 先解锁后台播放，再执行用户设置的静音：闩锁窗口内 applyMuteTo 会主动让路
+      this.ensureBackgroundPlayback(media);
       this.applyMuteTo(media, conf.muted);
     },
     applyToAll(root = document) {
@@ -317,7 +423,12 @@
       if (!media) return;
       this.applySettings(media);
       const playing = media.play();
-      if (playing && typeof playing.catch === 'function') playing.catch(() => { });
+      // 音频也要解锁后台播放：play() 落地之后再打闩锁（此时元素才满足「正在播放」）
+      if (playing && typeof playing.catch === 'function') {
+        playing.then(() => this.ensureBackgroundPlayback(media)).catch(() => { });
+      } else {
+        this.ensureBackgroundPlayback(media);
+      }
     }
   };
 

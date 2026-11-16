@@ -226,7 +226,7 @@
         const push = (leaf, section) => {
           const type = Number(leaf?.leaf_type);
           const progress = Number(leaf?.progress);
-          // 真实站点的 leaf id 是数字（48975327），但回归台/夹具用的是 'leaf-2' 这种字符串；
+          // 真实站点的 leaf id 是数字（例如 12345678），但回归台/夹具用的是 'leaf-2' 这种字符串；
           // 以前这里一律 Number()，非数字就被压成 NaN，于是 leafProgress() 在回归台永远返回 null
           // —— 接口进度这条路等于从来没被测到（全跑去读观看日志/侧栏了）。非数字就原样保留。
           const rawId = leaf?.id;
