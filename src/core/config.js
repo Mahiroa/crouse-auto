@@ -3,7 +3,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.6.7',     // 版本号（必须与 src/manifest.json 一致，构建会校验）
+    version: '3.6.8',     // 版本号（必须与 src/manifest.json 一致，构建会校验）
     playbackRate: Y.DEFAULT_PLAYBACK.rate, // 视频播放倍速。进入视频默认 2 倍速，面板里可改回 1
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动

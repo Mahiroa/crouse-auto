@@ -71,17 +71,50 @@
     return null;
   }
 
-  function findCanvas() {
-    const host = document.getElementById(HOST_ID);
-    if (host?.shadowRoot) {
-      const direct = host.shadowRoot.querySelector('canvas');
-      if (direct) return direct;
-      const nested = walk(host.shadowRoot, el => (el.tagName === 'CANVAS' ? el : null));
-      if (nested) return nested;
+  // 核验弹窗挂在哪个文档里，取决于平台把「作业」放在顶层还是 iframe：
+  // 刷课主流程跑在顶层（bootstrap 里 inIframe 直接 return），而作业界面是
+  // /v2/web/iframe-exercise/... 的 iframe。只查顶层 document 会永远看不见核验 ——
+  // 3.6.7 真机「面板没有任何核验提示、也没有连线动作」就是这个原因。
+  function reachableDocuments(root = document, depth = 0) {
+    const docs = [root];
+    if (depth > 2) return docs;
+    let frames = [];
+    try {
+      frames = [...root.querySelectorAll('iframe')];
+    } catch (_) {
+      frames = [];
     }
-    // 兜底：全文档 + 所有 shadow root 找 aria-label 命中的 canvas。
-    // 平台改 id 或者把核验区挪进另一个容器时，这条还能命中。
-    return walk(document, el => (el.tagName === 'CANVAS' && ARIA.test(el.getAttribute('aria-label') || '') ? el : null));
+    for (const frame of frames) {
+      if (frame.id === 'ykt-helper-iframe') continue;
+      let inner = null;
+      try {
+        inner = frame.contentDocument;
+      } catch (_) {
+        continue;
+      }
+      if (!inner || inner === root || docs.includes(inner)) continue;
+      for (const doc of reachableDocuments(inner, depth + 1)) {
+        if (!docs.includes(doc)) docs.push(doc);
+      }
+    }
+    return docs;
+  }
+
+  function findCanvas() {
+    for (const doc of reachableDocuments()) {
+      const host = doc.getElementById?.(HOST_ID) || doc.querySelector?.('[data-risk-target="challenge"]');
+      if (host?.shadowRoot) {
+        const direct = host.shadowRoot.querySelector('canvas');
+        if (direct) return direct;
+        const nested = walk(host.shadowRoot, el => (el.tagName === 'CANVAS' ? el : null));
+        if (nested) return nested;
+      }
+      // 兜底：这个文档里 + 所有 shadow root 找 aria-label 命中的 canvas。
+      // 平台改 id 或者把核验区挪进另一个容器时，这条还能命中。
+      const byAria = walk(doc, el => (el.tagName === 'CANVAS' && ARIA.test(el.getAttribute('aria-label') || '') ? el : null));
+      if (byAria) return byAria;
+    }
+    return null;
   }
 
   // 带参数时判那张 canvas；不带参数时判「当前这道核验」——create() 内部和外部调用方
@@ -637,8 +670,31 @@
 
   // 事件发送器：坐标是画布内坐标，事件要的是视口坐标，所以按
   // rect.left + px * rect.width / canvas.width 映射（宽高各算一次，不假设等比）。
-  function makeFirer(canvas) {
-    const doc = canvas.ownerDocument || document;
+  // 合成的 pointerdown 带着 pointerId=1，但它不是浏览器认定的活动指针，
+  // canvas.setPointerCapture(1) 会抛 NotFoundError。组件把这一步和「手势开始」
+  // 的初始化写在同一个表达式里，抛了就等于整段手势没开始（详见 solve() 的注释）。
+  // 这里只在拖动期间把这几个方法换成空实现，拖完立刻还原，不动组件其它逻辑。
+  function mutePointerCapture(canvas) {
+    const saved = {
+      set: canvas.setPointerCapture,
+      release: canvas.releasePointerCapture,
+      has: canvas.hasPointerCapture,
+    };
+    try {
+      canvas.setPointerCapture = () => {};
+      canvas.releasePointerCapture = () => {};
+      canvas.hasPointerCapture = () => true;
+    } catch (_) {}
+    return () => {
+      try {
+        if (saved.set) canvas.setPointerCapture = saved.set;
+        if (saved.release) canvas.releasePointerCapture = saved.release;
+        if (saved.has) canvas.hasPointerCapture = saved.has;
+      } catch (_) {}
+    };
+  }
+
+  function makeFirer(canvas) {    const doc = canvas.ownerDocument || document;
     const view = doc.defaultView || (typeof window !== 'undefined' ? window : globalThis);
     const rect = canvas.getBoundingClientRect();
     const kx = rect.width / canvas.width;
@@ -817,9 +873,19 @@
       cfg.log(`核验取点[${r.src}]：` + r.path.map(d => `${d.text}(${Math.round(d.x)},${Math.round(d.y)})`).join(' → '));
       if (cfg.preview) drawPreview(r.canvas, r.path);
       const { fire } = makeFirer(r.canvas);
+      // 平台组件在 pointerdown 里会调 canvas.setPointerCapture(e.pointerId)。
+      // 合成事件的 pointerId 不是真实活动指针，这个调用直接抛 NotFoundError，
+      // 而它在 `setPointerCapture?.(); v = {…手势状态…}` 这同一个逗号表达式里 ——
+      // 一抛就跳过整段手势初始化，后面的 pointermove/pointerup 全被组件忽略：
+      // 表现就是「明明画了线，平台当没画，弹窗还在」。
+      const restoreCapture = mutePointerCapture(r.canvas);
       // 动手前停一下：从「识别完」到「开始拖」零延迟本身就不是人
       await sleep(ri(180, 460));
-      await performTrace(r.canvas, r.path, cfg, fire);
+      try {
+        await performTrace(r.canvas, r.path, cfg, fire);
+      } finally {
+        restoreCapture();
+      }
       // 20×120ms ≈ 2.4 秒：组件校验/关闭弹窗一般在这之前完成。
       // 判「过了」的依据是核验区消失（不依赖平台的具体文案，文案改过一次）
       for (let i = 0; i < 20; i++) {
@@ -863,6 +929,8 @@
     isPresent,
     isVisible,
     installHooks,
+    // 给 human-check 复用：核验可能在顶层，也可能在作业 iframe 里
+    documents: reachableDocuments,
   };
 
   // document-start 就把钩子装好：本脚本 @run-at document-start，早于页面脚本执行，

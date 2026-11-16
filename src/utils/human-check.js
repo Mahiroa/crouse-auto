@@ -40,6 +40,27 @@
       try {
         if (Y.RiskChallenge?.isPresent?.() === true) return true;
       } catch (_) {}
+      // 求解模块不在（旧构建）时，按同一套结构自查：host + shadow 里的 canvas。
+      // 真机实测（3.6.7）：面板一句提示都没有，就是因为核验挂在作业 iframe 的
+      // open shadow root 里，innerText 里根本没有「安全核验」这四个字。
+      return this.challengeHostVisible();
+    },
+    challengeHostVisible() {
+      let docs = [document];
+      try {
+        const found = Y.RiskChallenge?.documents?.();
+        if (Array.isArray(found) && found.length) docs = found;
+      } catch (_) {}
+      for (const doc of docs) {
+        if (!doc?.querySelector) continue;
+        const host = doc.getElementById?.('homework-automation-risk-challenge')
+          || doc.querySelector('[data-risk-target="challenge"]');
+        if (!host?.shadowRoot) continue;
+        const canvas = host.shadowRoot.querySelector('canvas');
+        if (!canvas) continue;
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width >= 80 && rect.height >= 40) return true;
+      }
       return false;
     },
     humanCheckMode() {
@@ -200,9 +221,17 @@
         // 弹窗消失即复位自动求解的去重位：下一个核验弹窗还能再自动试一次
         this._humanCheckAutoTried = false;
         this._humanCheckAutoFailLogged = false;
+        this._humanCheckAnnounced = false;
         return 'ok';
       }
       const mode = this.humanCheckMode();
+      // 真机反馈过「一句提示都没有」：核验挂在 shadow root 里，没有可读文案时，
+      // 至少要让面板说清楚「检测到了、正在自动过」。skip / wait 两条路本来就会各打一行，
+      // 这里只补 auto 缺的那句开场白，避免同一个弹窗刷出两条重复提示。
+      if (!this._humanCheckAnnounced) {
+        this._humanCheckAnnounced = true;
+        if (mode === 'auto') Y.panel?.log('检测到安全核验（轨迹 canvas），开始自动过关');
+      }
       // 「跳过当前章节」：不要在核验弹窗上无限等待，直接把控制权交回调用方，
       // 由 poll 返回 false / humanClick 放弃点击，让当前项被记成跳过并进入下一项。
       if (mode === 'skip') {
@@ -253,26 +282,121 @@
     async waitIfHumanCheck() {
       return (await this.gateHumanCheck()) !== 'skip';
     },
-    async humanClick(element, min = 800, max = 2000) {
-      if (!element) return false;
-      if (!await this.waitIfHumanCheck()) return false;
-      if (this.isFastMode()) {
-        try {
-          element.scrollIntoView({ block: 'nearest' });
-        } catch (_) {}
+    // 平台的反作弊 SDK 会统计「每次点击前的指针轨迹点数」和「每次按下期间的移动点数」
+    // （规则 id：pointer.trajectory-points.very-low 20 分 / pointer.move-per-down.very-low 25 分，
+    //   阈值 20 分且至少命中 2 条规则才弹核验）。
+    // 直接 element.click() 这两项全是 0，加上「非可信直接业务点击」10 分正好 30 分 → 必弹核验。
+    // 这里补一条人手轨迹：移动 → 按下 → 微移 → 松开 → click，把点位统计喂饱。
+    async pointerClick(element) {
+      const doc = element.ownerDocument || document;
+      const view = doc.defaultView || window;
+      let rect = null;
+      try {
+        rect = element.getBoundingClientRect();
+      } catch (_) {}
+      // 拿不到布局（display:none / jsdom）时退回原生 click，别把事件派发到 (0,0)
+      if (!rect || !rect.width || !rect.height) {
         element.click();
         return true;
       }
-      if (Math.random() < 0.75) {
+      const cx = rect.left + rect.width / 2 + (Math.random() - 0.5) * Math.min(20, rect.width * 0.35);
+      const cy = rect.top + rect.height / 2 + (Math.random() - 0.5) * Math.min(10, rect.height * 0.35);
+      const startX = cx - 90 - Math.random() * 140;
+      const startY = cy - 30 - Math.random() * 70;
+      const fire = (type, x, y, buttons = 0) => {
+        const init = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view,
+          clientX: x,
+          clientY: y,
+          screenX: x,
+          screenY: y,
+          button: 0,
+          buttons,
+          detail: type === 'click' ? 1 : 0,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+          metaKey: false
+        };
         try {
-          element.scrollIntoView({ behavior: Math.random() < 0.55 ? 'smooth' : 'auto', block: Math.random() < 0.7 ? 'center' : 'nearest' });
+          if (type.startsWith('pointer') && view.PointerEvent) {
+            element.dispatchEvent(new view.PointerEvent(type, {
+              ...init,
+              pointerId: 1,
+              pointerType: 'mouse',
+              isPrimary: true,
+              pressure: buttons ? 0.5 : 0
+            }));
+            return;
+          }
+          const mouseType = type.startsWith('pointer') ? type.replace('pointer', 'mouse') : type;
+          element.dispatchEvent(new view.MouseEvent(mouseType, init));
         } catch (_) {}
-        await this.humanPause(180, 900);
+      };
+      // 1) 走近目标：12~16 个轨迹点，带一点弧度，长度超过 SDK 的「轨迹点极少」阈值（3）
+      const steps = 12 + Math.floor(Math.random() * 5);
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const ease = t * t * (3 - 2 * t);
+        const wobble = Math.sin(t * Math.PI) * (Math.random() - 0.5) * 26;
+        fire('pointermove', startX + (cx - startX) * ease, startY + (cy - startY) * ease + wobble);
+        fire('mousemove', startX + (cx - startX) * ease, startY + (cy - startY) * ease + wobble);
+        await this.sleep(Math.round(4 + Math.random() * 12));
       }
-      await this.humanPause(min, max);
-      if (Math.random() < 0.3) await this.humanPause(350, 1600);
+      fire('pointerover', cx, cy);
+      fire('pointerenter', cx, cy);
+      fire('mouseover', cx, cy);
+      // 2) 按下 → 微移 4~6 次（movePerDown 要 > 20 才能躲开 pointer.move-per-down 规则）
+      fire('pointerdown', cx, cy, 1);
+      fire('mousedown', cx, cy, 1);
+      const jitterSteps = 4 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < jitterSteps; i++) {
+        fire('pointermove', cx + (Math.random() - 0.5) * 3, cy + (Math.random() - 0.5) * 3, 1);
+        fire('mousemove', cx + (Math.random() - 0.5) * 3, cy + (Math.random() - 0.5) * 3, 1);
+        await this.sleep(Math.round(8 + Math.random() * 16));
+      }
+      // 3) 松开 → 真正的 click（业务逻辑还是靠它，pointer/mouse 系列只是给统计看的）
+      fire('pointerup', cx, cy, 0);
+      fire('mouseup', cx, cy, 0);
       element.click();
-      if (Math.random() < 0.35) await this.humanPause(220, 900);
+      return true;
+    },
+    async humanClick(element, min = 800, max = 2000) {
+      if (!element) return false;
+      if (!await this.waitIfHumanCheck()) return false;
+      const fast = this.isFastMode();
+      if (fast) {
+        try {
+          element.scrollIntoView({ block: 'nearest' });
+        } catch (_) {}
+      } else {
+        if (Math.random() < 0.75) {
+          try {
+            element.scrollIntoView({ behavior: Math.random() < 0.55 ? 'smooth' : 'auto', block: Math.random() < 0.7 ? 'center' : 'nearest' });
+          } catch (_) {}
+          await this.humanPause(180, 900);
+        }
+        await this.humanPause(min, max);
+        if (Math.random() < 0.3) await this.humanPause(350, 1600);
+      }
+      await this.pointerClick(element);
+      // 平台的反作弊 SDK 会拦下「提交 / 下一题 / 保存」这类业务按钮的点击
+      // （preventDefault + stopImmediatePropagation），换成核验弹窗 —— 也就是说
+      // 这一次点击等于没点。所以这类按钮点完等一拍：核验出来了就先过关，再审一次。
+      const label = String(element.innerText ?? element.textContent ?? '').replace(/\s+/g, '');
+      if (/提交|保存|下一题|上一题|确认|确定/.test(label)) {
+        await this.sleep(400);
+        if (this.isHumanCheckVisible()) {
+          const outcome = await this.gateHumanCheck();
+          if (outcome === 'skip') return false;
+          Y.panel?.log('核验已过，重新点一次刚才被拦下的按钮');
+          await this.pointerClick(element);
+        }
+      }
+      if (!fast && Math.random() < 0.35) await this.humanPause(220, 900);
       return true;
     }
   };
