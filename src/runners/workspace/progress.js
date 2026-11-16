@@ -1,6 +1,12 @@
 ((Y) => {
   // 目录审计与平台记账查询
 
+  // 残余缺口的容忍阈值（秒）：心跳大约 5 秒采样一次、30 秒一批上报
+  // （docs/视频观看日志-取证.md §6.5 / §6.6），1.5~3 秒的洞大多落在两次采样的交界上，
+  // 补播也补不动。真机那种「24 段、共 09:01」的日志里这种碎洞占了不少，
+  // 一律当「没满」会让脚本反复回来补同一节，9 分钟只换 2 个百分点。
+  const GAP_TOLERANCE_SEC = 3;
+
   const WorkspaceProgressMixin = {
     // ---- 平台进度：目录审计 / 单节进度 / 视频补刷 ----
     // 注意：verify/forum-reply-tests.js 会把 AiWorkspaceRunner 整类切出来，只注入
@@ -252,9 +258,20 @@
     // 视频有没有「真的全看完」：rate 到 0.999 算满；拿到区间表时更准 ——
     // 没有任何 >= VideoLedger.MIN_GAP 的缺口就算满（抓包里区间右端会比时长多 1~2 秒，
     // 所以 rate 可能 >1，不能用 rate>=1 当唯一判据）。
+    // 有区间表且还有缺口时再看 gapSeconds：合计 <= GAP_TOLERANCE_SEC（3 秒）也算满，
+    // 理由见上面 GAP_TOLERANCE_SEC 的注释 —— 这种碎洞补不动，不该让脚本为它反复回来补。
     videoFullyCredited(info) {
       if (!info) return false;
-      if (Array.isArray(info.gaps)) return info.gaps.length === 0;
+      if (Array.isArray(info.gaps)) {
+        if (!info.gaps.length) return true;
+        // gapSeconds 是 api.js 算好的合计；缺失/非数字时按区间表现算（null 不能被 Number 折成 0 当成满）
+        const gapSeconds = info.gapSeconds;
+        const total = gapSeconds != null && Number.isFinite(Number(gapSeconds))
+          ? Number(gapSeconds)
+          : info.gaps.reduce((sum, item) => sum
+            + Math.max(0, Number(item?.e || 0) - Number(item?.s || 0)), 0);
+        return total <= GAP_TOLERANCE_SEC;
+      }
       return info.rate != null && info.rate >= Y.DONE_RATE;
     }
   };

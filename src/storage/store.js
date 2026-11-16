@@ -31,6 +31,12 @@
     }
   };
 
+  // ---- 作业答案缓存 ----
+  // 答案缓存只是加速器：命中就省一次模型调用，删掉只影响速度，不影响配置语义，
+  // 所以键和上限都放在 store.js 内部，不进 core/config.js。
+  const ANSWER_CACHE_KEY = 'ykt_answer_cache_v1';
+  const ANSWER_CACHE_LIMIT = 300;
+
   const Store = {
     // localStorage 里可能是 null / 数组 / 数字等脏数据，统一归一成普通对象，
     // 避免 `all[url] = ...` 在 null 上抛 TypeError 把整条刷课链打断
@@ -212,6 +218,52 @@
       const all = this.readObject(Y.Config.storageKeys.trail);
       delete all[this.trailScope()];
       localStorage.setItem(Y.Config.storageKeys.trail, JSON.stringify(all));
+    },
+    // ---- 作业答案缓存（跨运行） ----
+    // 键来自 Y.Solver.questionFingerprint（题干 + 选项文本的 FNV-1a），值形如
+    // { answer: 'C' | 'AB' | '对' | '错', type: 'single'|'multiple'|'judge', at: 毫秒时间戳 }。
+    // 读全部时统一归一：坏 JSON / 非对象 / 数组 / 缺 answer 的条目一律丢掉，返回普通对象 {}，
+    // 这样后面 all[key] = ... 不会在 null 上抛 TypeError。
+    readAnswerCache() {
+      const parsed = Y.Utils.safeJSONParse(storeSafe.get(ANSWER_CACHE_KEY), {});
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      const normalized = {};
+      for (const [key, entry] of Object.entries(parsed)) {
+        if (!key || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const answer = typeof entry.answer === 'string' ? entry.answer.trim() : '';
+        if (!answer) continue;
+        normalized[key] = {
+          answer,
+          type: typeof entry.type === 'string' && entry.type ? entry.type : 'single',
+          at: Number.isFinite(Number(entry.at)) ? Number(entry.at) : 0
+        };
+      }
+      return normalized;
+    },
+    getAnswerCache(key) {
+      if (!key) return null;
+      return this.readAnswerCache()[key] || null;
+    },
+    setAnswerCache(key, entry) {
+      const answer = typeof entry?.answer === 'string' ? entry.answer.trim() : '';
+      if (!key || !answer) return false;
+      const all = this.readAnswerCache();
+      all[key] = {
+        answer,
+        type: typeof entry?.type === 'string' && entry.type ? entry.type : 'single',
+        at: Number.isFinite(Number(entry?.at)) ? Number(entry.at) : Date.now()
+      };
+      // 上限 300 条：按 at 升序排，只留最新的 300 条，最旧的先淘汰。
+      // 排序后重建对象，保证淘汰结果直接写回，不会因为键顺序残留旧条目。
+      const sorted = Object.entries(all).sort((a, b) => a[1].at - b[1].at);
+      const trimmed = {};
+      for (const [cacheKey, cacheEntry] of sorted.slice(Math.max(0, sorted.length - ANSWER_CACHE_LIMIT))) {
+        trimmed[cacheKey] = cacheEntry;
+      }
+      return storeSafe.set(ANSWER_CACHE_KEY, JSON.stringify(trimmed));
+    },
+    clearAnswerCache() {
+      return storeSafe.remove(ANSWER_CACHE_KEY);
     },
   };
 

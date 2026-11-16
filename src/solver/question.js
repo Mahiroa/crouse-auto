@@ -16,6 +16,32 @@
         .replace(/\n{3,}/g, '\n\n')
         .trim();
     },
+    // 纯函数：清理题干里的字体水印 / 反作弊字符，不依赖 DOM，可直接在 node 里调用
+    // 规则一：删掉私用区字符（BMP 的 U+E000–U+F8FF，以及平面 15/16 私用区）
+    // 规则二：删掉「乱码 + yyyy-m-d/h:mm」的整行；题干/选项行只裁掉日期片段
+    // 规则三：折叠多余空格与连续空行
+    scrubWatermark(text) {
+      const dateTime = /\d{4}-\d{1,2}-\d{1,2}\s*\/\s*\d{1,2}:\d{2}/;
+      const dateTimeAll = /\d{4}-\d{1,2}-\d{1,2}\s*\/\s*\d{1,2}:\d{2}/g;
+      const source = String(text ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}]/gu, '');
+      const kept = [];
+      for (const line of source.split('\n')) {
+        if (!dateTime.test(line)) {
+          kept.push(line);
+          continue;
+        }
+        // 带问号、选项字母或题干措辞的行可能是正常题目（例如「…2026-12-28/23:59 下列正确的是？」），
+        // 这种只裁掉日期片段；其余「乱码 + 日期时间」的行按水印整行丢弃
+        if (/[?？]/.test(line) || /(?:^|[\s（(【\[])[A-F][.、．)）:：]/.test(line) || /(?:下列|以下|关于|正确|错误|属于|选项|判断|计算|简述|论述|哪[个项种些]|多少)/.test(line)) {
+          const trimmed = line.replace(dateTimeAll, ' ').replace(/[ \t\u3000]+/g, ' ').trim();
+          if (trimmed) kept.push(trimmed);
+          continue;
+        }
+      }
+      return kept.map(line => line.replace(/[ \t\u3000]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    },
     // 截图识题走同一份 DeepSeek 配置；如果接口/模型不接受图片，会自动退回本地 OCR
     modelCanSee() {
       if (this._imageUnsupported) return false;
@@ -119,17 +145,25 @@
       const font = this._fontCache[fontUrl];
       const hashMap = await this.loadGlyphHashMap();
       const mapping = {};
+      let unmapped = 0;
       for (const char of chars) {
         const glyph = font.charToGlyph(char);
+        // 字体里根本没有这个字形（path.commands 为空）：说明它本来就不是加密字，保留原字符
         if (!glyph?.path?.commands?.length) continue;
         const hash = await this.hashGlyph(glyph.path.commands);
         const delta = hashMap[hash];
-        if (delta !== undefined) mapping[char] = String.fromCodePoint(delta + 0x3400);
+        if (delta !== undefined) {
+          mapping[char] = String.fromCodePoint(delta + 0x3400);
+          continue;
+        }
+        // 有字形但对照表缺这一条：是加密字却还原不出来，占位成 □，别把加密字原样喂给搜题/模型
+        mapping[char] = '□';
+        unmapped++;
       }
-      const mapped = Object.keys(mapping).length;
-      Y.panel.log(`字体还原 ${mapped}/${chars.length} 个字`);
+      const mapped = Object.keys(mapping).length - unmapped;
+      Y.panel.log(`字体还原 ${mapped}/${chars.length} 个字${unmapped ? `（${unmapped} 个未映射字已置为 □）` : ''}`);
       if (mapped < Math.max(3, Math.ceil(chars.length * 0.5))) return '';
-      return raw.replace(/[\u4e00-\u9fff]/g, char => mapping[char] || char);
+      return this.scrubWatermark(raw.replace(/[\u4e00-\u9fff]/g, char => mapping[char] || char));
     },
     async shootQuestion(element) {
       Y.panel.log('正在截图...');
@@ -159,7 +193,8 @@
           return { image, text: '题目截图', element };
         }
         const text = await this.recognize(element);
-        const clean = this.stripReviewNoise(text);
+        // OCR 不会产私用区字符，但截图里可能带着水印串，统一过一次清洗
+        const clean = this.scrubWatermark(this.stripReviewNoise(text));
         // recognize() 失败时会返回哨兵字符串；不能把它当成题目继续问 AI，
         // 否则模型会被强制按“选择题”作答，脚本会随机选中并提交。
         if (!clean || /^OCR识别出错$|^无元素$/.test(clean) || clean.replace(/\s/g, '').length < 6) {

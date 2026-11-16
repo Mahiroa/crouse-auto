@@ -13,7 +13,7 @@
 > 🚀 一个跑在浏览器里的油猴脚本（Userscript）：把雨课堂里「视频 / 音频 / 课件 / 图文 / PDF / 作业 / 测验 / 讨论」按目录顺序自动做完，
 > 而且进度**以平台自己的记账为准**，不是「播放器播到头了」。
 >
-> `v3.6.2` · 👤 作者 **Mark** · 📜 许可证 **GPL-3.0** · 🧩 35 个模块拼装的单文件脚本 · 🎧 **100% Vibe Coding 项目**
+> `v3.6.3` · 👤 作者 **Mark** · 📜 许可证 **GPL-3.0** · 🧩 35 个模块拼装的单文件脚本 · 🎧 **100% Vibe Coding 项目**
 
 ---
 
@@ -22,7 +22,7 @@
 ## 📸 界面预览
 
 <p align="center">
-  <img src="assets/panel-preview.png" width="380" alt="雨课堂刷课助手面板 v3.6.2：顶部版本号与运行中徽标、当前进度 57/60 项、视频进行中、倍速/静音/快速模式开关、刷课轨迹、运行日志，底部为刷课中…/停止/设置/更多">
+  <img src="assets/panel-preview.png" width="380" alt="雨课堂刷课助手面板 v3.6.3：顶部版本号与运行中徽标、当前进度 57/60 项、视频进行中、倍速/静音/快速模式开关、刷课轨迹、运行日志，底部为刷课中…/停止/设置/更多">
 </p>
 
 面板就是一个可拖动的小窗，**所有判断都摆在明面上**，不靠猜：
@@ -313,10 +313,10 @@ v2 链路带 500 轮硬上限防死循环。大部分「不支持的类型」在
 ## 4. 快速开始 🚀
 
 1. 🧩 **装脚本管理器**：Tampermonkey（Chrome / Edge / Firefox 均可）。
-2. 📥 **导入脚本**：新建脚本 → 清空模板 → 粘贴构建产物 `雨课堂刷课助手-3.6.2.user.js` 全文 → `Ctrl+S` 保存。
+2. 📥 **导入脚本**：新建脚本 → 清空模板 → 粘贴构建产物 `雨课堂刷课助手-3.6.3.user.js` 全文 → `Ctrl+S` 保存。
    > 产物在本地 `dist/`，由 `src/` 拼装生成（见 [§9 构建](#build)）。也可以直接从
-   > [Releases](https://github.com/Mahiroa/crouse-auto/releases/latest) 下载现成的 `yuketang-helper-3.6.2.user.js`
-   > （GitHub 会剥离资产名里的非 ASCII 字符，所以发布件用 ASCII 文件名；内容与本地 `雨课堂刷课助手-3.6.2.user.js` 完全一致，SHA256 见发布页）。
+   > [Releases](https://github.com/Mahiroa/crouse-auto/releases/latest) 下载现成的 `yuketang-helper-3.6.3.user.js`
+   > （GitHub 会剥离资产名里的非 ASCII 字符，所以发布件用 ASCII 文件名；内容与本地 `雨课堂刷课助手-3.6.3.user.js` 完全一致，SHA256 见发布页）。
    > 脚本头部已声明 `@require` 的 CDN 依赖，首次加载需要能访问 `cdn.jsdelivr.net` / `cdnjs.cloudflare.com` / `unpkg.com`。
 3. 📚 **打开课程**：进到雨课堂的课程学习页，右上会出现「雨课堂刷课助手」面板（拖到顺手的位置，位置会记住）。
 4. ⚙️ **按需配置**：点「设置」→ 填 AI 接口（要答题才需要）、选倍速 / 静音、选人机验证策略 →「保存并关闭」。
@@ -468,7 +468,7 @@ crouse-auto/
 ```powershell
 cd tools
 npm install        # 首次：acorn、eslint-scope
-npm run build      # → dist/雨课堂刷课助手-3.6.2.user.js + dist/build-report.json
+npm run build      # → dist/雨课堂刷课助手-3.6.3.user.js + dist/build-report.json
 npm run verify     # → dist/migration-parity.json（与旧单文件的等价校验）
 ```
 

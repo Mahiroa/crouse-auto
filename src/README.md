@@ -1,7 +1,7 @@
-# src/ · 模块源码（雨课堂刷课助手 3.6.2）
+# src/ · 模块源码（雨课堂刷课助手 3.6.3）
 
 `src/` 是**唯一的开发入口**：35 个模块按领域分目录存放，`manifest.json` 显式声明加载顺序与拓扑依赖（`loadAfter`），
-`userscript.header.txt` 提供产物头部。产物 `dist/雨课堂刷课助手-3.6.2.user.js` 由 `tools/build-userscript.js` 拼装生成，**不要手改**——下一次构建直接覆盖。
+`userscript.header.txt` 提供产物头部。产物 `dist/雨课堂刷课助手-3.6.3.user.js` 由 `tools/build-userscript.js` 拼装生成，**不要手改**——下一次构建直接覆盖。
 
 ```
 src/
@@ -257,7 +257,7 @@ class 主体留在 `runner.js`（constructor + 主流程方法），其余方法
 ```powershell
 cd tools        # 在仓库根目录执行
 
-npm run build     # = node build-userscript.js → dist/雨课堂刷课助手-3.6.2.user.js + dist/build-report.json
+npm run build     # = node build-userscript.js → dist/雨课堂刷课助手-3.6.3.user.js + dist/build-report.json
 npm run verify    # = node verify-migration.js  → dist/migration-parity.json（与根旧单文件做等价校验）
 npm run migrate   # = node migrate-to-modules.js → 仅溯源/灾后重建，日常不要跑（会覆盖 src/）
 ```

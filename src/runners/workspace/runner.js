@@ -200,14 +200,18 @@
     async handleStep(route) {
       const key = `${route.leafId}|${route.nodeId || ''}`;
       const kind = Y.AiWorkspace.routeKind(route.type);
+      const mediaKind = kind === 'video' || kind === 'audio';
       let ok = false;
+      // 媒体节照样保留 2 次尝试：换集后播放器晚挂载是常态，一次没就绪就直接判死会漏刷一节。
+      // 但重试前的停顿要短：播放器重挂是毫秒级的事，等 1.5~3 秒只会错过它自己加载好的时机；
+      // 图文/讨论/作业的失败多是接口慢，维持原来的停顿。
       for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
         if (attempt > 1) {
           this.panel.log(`当前内容没有处理成功，重试 ${attempt}/2`);
-          await Y.Utils.humanPause(1500, 3000);
+          await Y.Utils.humanPause(mediaKind ? 300 : 1500, mediaKind ? 600 : 3000);
           await this.reopenCurrentLeaf();
         }
-        if (kind === 'video' || kind === 'audio') {
+        if (mediaKind) {
           ok = await this.handleMedia(route);
         } else if (kind === 'exercise') {
           ok = await this.handleExercise(route);
@@ -538,6 +542,8 @@
       const switchStartedAt = Date.now();
       await Y.Utils.humanPause(600, 1500);
       const clicked = await this.clickLeaf(target);
+      // 从这里开始才是 waitLeafSwitch 的 poll：它的墙钟最容易被后台节流放大，单独记起点
+      const switchPollAt = Date.now();
       if (!clicked) {
         // clickLeaf 返回 false：元素点不到，或 humanClick 被安全核验拦下。
         // 核验场景必须立刻停住，不能换一种点击方式绕过核验、也不能继续 poll。
@@ -548,7 +554,7 @@
         }
         this.panel.log(`点击「${title}」没有生效，换一种点击方式再试`);
       } else if (await this.waitLeafSwitch(before, box, 12000)) {
-        this.markLeafEntered(box, index, title, Date.now() - switchStartedAt);
+        this.markLeafEntered(box, index, title, this.switchCostMs(switchStartedAt, switchPollAt), Date.now() - switchStartedAt);
         await this.waitEnteredReady(box);
         return true;
       } else {
@@ -563,8 +569,9 @@
       // 一次点不动就换点击目标再试（有的版本点击事件绑在 a 或外层盒子上）
       const hardClicked = await this.clickLeaf(box.querySelector('a[href]') || box, true);
       if (!hardClicked) return fail('点击目标不可用', '点击目标不可用');
+      const hardPollAt = Date.now();
       if (await this.waitLeafSwitch(before, box, 8000)) {
-        this.markLeafEntered(box, index, title, Date.now() - switchStartedAt);
+        this.markLeafEntered(box, index, title, this.switchCostMs(switchStartedAt, hardPollAt), Date.now() - switchStartedAt);
         await this.waitEnteredReady(box);
         return true;
       }
@@ -576,10 +583,13 @@
       return fail('切换失败', '切换失败');
     }
 
-    markLeafEntered(box, index, title, costMs = 0) {
+    markLeafEntered(box, index, title, costMs = 0, wallMs = 0) {
       this.currentIndex = index;
       this.handled.add(this.getLeafKey(box, index));
-      const cost = Number(costMs) > 0 ? `，切换用时 ${(Number(costMs) / 1000).toFixed(1)} 秒` : '';
+      // 切换用时同样按「有效等待」报（口径见 pollSpentMs）：wallMs 只用来判断要不要补一句
+      // 「（含后台节流）」，绝不把被休眠/节流放大的秒数直接写进日志
+      const note = Number(wallMs) > 0 ? this.throttleNote(wallMs, costMs) : '';
+      const cost = Number(costMs) > 0 ? `，切换用时 ${(Number(costMs) / 1000).toFixed(1)} 秒${note}` : '';
       this.panel.log(`已进入：${Y.AiWorkspace.getActiveLeafTitle() || title}${cost}`);
     }
 
@@ -619,8 +629,44 @@
       }, { interval: 300, timeout });
     }
 
-    // 非媒体节（图文 / 讨论 / 作业 / PPT）根本没有播放器，别在 waitPlayerReady 上白等 10 秒：
-    // 真机上这类节有 50+ 个，每个白等 10 秒就是近 10 分钟的无效耗时。
+    // ---- 耗时口径：有效等待 ≠ 墙钟 ----
+    // 墙钟（Date.now 前后相减）会把「系统休眠 / 后台标签页定时器被冻结」的时间一起算进去：
+    // 真机日志里的「切换用时 61.0 秒」「已等 59.0 秒」「等了 9783 秒」全是这么来的 —— 脚本其实只等了
+    // 几秒，多出来的是浏览器把定时器按在后台不动的时间。用户看到这种数字只会以为脚本卡死了。
+    // 而 poll 内部本来就是按「有效等待」累计的（短暂隐藏完全不计、长时间隐藏只算超出宽限的部分、
+    // 单轮异常冻结按一个 interval 计入），所以这两个口径必须分开：日志报「有效等待」，
+    // 墙钟只在两者差得多时作为「这段时间被后台节流」的旁证，不直接写进秒数。
+    // lastPollSpent 是 T1 任务在 timing.js 里记的有效耗时（毫秒）；读不到或读数不可信时
+    // 一律退回墙钟差值（也就是改动前的算法），不把它做成硬依赖。
+    pollSpentMs(wallMs) {
+      const wall = Math.max(0, Number(wallMs) || 0);
+      // poll 是用 Y.Utils.poll(...) 调起来的，函数里的 this 是装配后的 Y.Utils 而不是 Y.UtilsTiming，
+      // 这个读数可能落在任意一边，所以两处都读；取较大的可信值，再夹到墙钟以内
+      // （比墙钟还大的只可能是上一次 poll 的残留，不能拿它报更长的耗时）。
+      const spent = [Y.UtilsTiming?.lastPollSpent, Y.Utils?.lastPollSpent]
+        .map(value => Number(value))
+        .filter(value => Number.isFinite(value) && value > 0)
+        .reduce((max, value) => Math.max(max, value), 0);
+      if (!spent) return wall;
+      return Math.min(spent, wall);
+    }
+
+    // 有效等待比墙钟少 5 秒以上，说明有一部分时间是被后台节流/系统休眠吃掉的：
+    // 日志里补一句「（含后台节流）」，既解释了体感，又不把放大的秒数写出来
+    throttleNote(wallMs, effMs) {
+      return Number(wallMs) - Number(effMs) >= 5000 ? '（含后台节流）' : '';
+    }
+
+    // 切换一节 = humanPause + 点击 + waitLeafSwitch 的 poll。只有 poll 那一段会被节流放大，
+    // 所以把它单独切出来：poll 之前的真实停顿照算，poll 用有效等待
+    switchCostMs(switchStartedAt, pollStartedAt) {
+      const preCost = Math.max(0, Number(pollStartedAt) - Number(switchStartedAt));
+      const pollWall = Math.max(0, Date.now() - Number(pollStartedAt));
+      return preCost + this.pollSpentMs(pollWall);
+    }
+
+    // 非媒体节（图文 / 讨论 / 作业 / PPT）根本没有播放器，别在 waitPlayerReady 上白等 6 秒：
+    // 真机上这类节有 50+ 个，每个白等 6 秒就是 5 分钟起的无效耗时。
     leafNeedsMedia(box) {
       const kind = Y.AiWorkspace.kindFromTag(Y.AiWorkspace.leafTag(box));
       return !kind || kind === 'video' || kind === 'audio';
@@ -632,7 +678,7 @@
       return true;
     }
 
-    async waitPlayerReady(timeout = 10000) {
+    async waitPlayerReady(timeout = 6000) {
       const startedAt = Date.now();
       const ready = await Y.Utils.poll(() => {
         const media = Y.AiWorkspace.getMedia();
@@ -641,10 +687,14 @@
         if (media.readyState < 2 || !Number.isFinite(duration) || duration <= 1) return false;
         return !this.isStaleMedia(media);
       }, { interval: 400, timeout });
-      const cost = (Date.now() - startedAt) / 1000;
-      // 这一段的耗时经常被误当成“上一节播完后卡住”，所以超过 1 秒就单独记一行
-      if (!ready) this.panel.log(`下一节播放器还没就绪（已等 ${cost.toFixed(1)} 秒），继续等它加载`);
-      else if (cost >= 1) this.panel.log(`下一节播放器已就绪（等 ${cost.toFixed(1)} 秒）`);
+      const wallMs = Date.now() - startedAt;
+      // 报「有效等待」而不是墙钟：这一段的耗时经常被误当成“上一节播完后卡住”
+      const costMs = this.pollSpentMs(wallMs);
+      const cost = costMs / 1000;
+      const note = this.throttleNote(wallMs, costMs);
+      // 超过 1 秒就单独记一行，避免用户以为接口/播放器卡住却没痕迹
+      if (!ready) this.panel.log(`下一节播放器还没就绪（已等 ${cost.toFixed(1)} 秒${note}），继续等它加载`);
+      else if (cost >= 1) this.panel.log(`下一节播放器已就绪（等 ${cost.toFixed(1)} 秒${note}）`);
       return ready;
     }
 

@@ -2,7 +2,41 @@
   // 练习与讨论处理
 
   const WorkspaceExerciseMixin = {
-    async solveExerciseQuestion(root, label = '') {
+    // 幂等集合挂在 mixin 实例上，只活在本实例的内存里：同一指纹成功提交过一次，之后
+    // 再遇到同一指纹就不再提交（同一题干两次不同答案会互相覆盖）。刷新页面 / 重开一轮后
+    // answeredFingerprints 就是空的 —— 这是预期行为，跨运行复用靠 Y.Store 的答案缓存。
+    exerciseAnsweredKeys() {
+      if (!(this.answeredFingerprints instanceof Set)) this.answeredFingerprints = new Set();
+      return this.answeredFingerprints;
+    },
+    // 提交确认信号：只认结果类文本和「提交按钮 disabled」这两种保守判据。
+    // 刻意不用「提交按钮消失」——平台切题/重渲染时按钮会短暂消失，那种判据会把没交上的题
+    // 当成已提交直接跳过。本方法只在点过提交之后才被轮询，所以不会把未作答的题当已提交。
+    exerciseSubmitConfirmed(root) {
+      const container = Y.AiWorkspace.getExerciseContainer() || root;
+      if (!container) return '';
+      const questionRoot = Y.AiWorkspace.getExerciseQuestionBody(container) || container;
+      if (Y.Solver.revealedResult(questionRoot)) return '本题得分/正确答案已出现';
+      if (Y.AiWorkspace.isExerciseAnswered(questionRoot)) return '已作答/已完成';
+      // isExerciseAnswered 只看 .result / .status 这类节点，纯文本状态（有的题型只写一行「已作答」）
+      // 会漏掉，这里按题干容器补一次正文扫描。
+      const statusText = Y.AiWorkspace.normalizeText(questionRoot?.innerText || '').match(/已作答|已完成/);
+      if (statusText) return `页面出现「${statusText[0]}」`;
+      const submitBtn = Y.AiWorkspace.getExerciseActionButton(container, /提交|保存|确认|确定/);
+      if (!submitBtn) return '';
+      const disabled = submitBtn.disabled === true
+        || submitBtn.getAttribute('aria-disabled') === 'true'
+        || submitBtn.classList.contains('is-disabled');
+      return disabled ? '提交按钮已禁用' : '';
+    },
+    // 「第 1 题 未找到选项」在真机日志里每份作业都出现，而且只出现在第一题：比「这题是填空题」
+    // 更像「选项还没渲染完就被读到了」。所以判无选项之前给一个很短（1.2 秒）的宽限，
+    // 真的没有选项才按填空/简答翻页；宽限命中就正常答题，不会把刚打开的选择题跳过。
+    async waitExerciseChoices(questionRoot) {
+      if (Y.Solver.questionChoices(questionRoot).length) return true;
+      return Y.Utils.poll(() => Y.Solver.questionChoices(questionRoot).length > 0, { interval: 250, timeout: 1200 });
+    },
+    async solveExerciseQuestion(root, label = '', fingerprint = '') {
       const questionRoot = Y.AiWorkspace.getExerciseQuestionBody(root);
       if (!questionRoot) {
         this.panel.log('未找到题目容器，停止当前轮次');
@@ -13,12 +47,40 @@
         return true;
       }
 
+      // 选项还没渲染出来时先宽限等一下，再决定是不是真的没有选项。
+      if (!Y.Solver.questionChoices(questionRoot).length) await this.waitExerciseChoices(questionRoot);
       const choices = Y.Solver.questionChoices(questionRoot);
       const optionCount = choices.length;
       const questionType = Y.Solver.detectQuestionType(questionRoot);
+      // 填空/简答这类没有选项的题没有可点的东西：以前这里 return false，调用方仍会走
+      // 「答题后」等待链（8 秒 + 4 秒 + 5 秒），真机日志里每份作业的第一题都卡死在这里。
+      // 现在直接点下一题，并把题干指纹传下去，避免同一题被当成新题反复处理。
       if (!optionCount) {
-        this.panel.log(`${label || '当前题目'} 未找到选项，跳过`);
-        return false;
+        this.panel.log(`${label || '当前题目'} 没有选项（填空/简答类），直接翻到下一题`);
+        await this.advanceExerciseQuestion(questionRoot, fingerprint);
+        return true;
+      }
+
+      // 缓存 key = 题干 + 选项文本的指纹：选项顺序一变 key 就变，不会误命中。
+      const questionKey = Y.Solver.questionFingerprint(questionRoot);
+      const answeredKeys = this.exerciseAnsweredKeys();
+      if (questionKey && answeredKeys.has(questionKey)) {
+        this.panel.log(`${label || '当前题目'} 本题已提交过，直接翻到下一题`);
+        await this.advanceExerciseQuestion(questionRoot, fingerprint);
+        return true;
+      }
+
+      // 命中缓存就直接提交，不再截图/OCR/请求模型；提交失败（返回 false）才回退 AI 流程。
+      const cached = questionKey ? Y.Store.getAnswerCache(questionKey) : null;
+      if (cached?.answer) {
+        this.panel.log(`${label || '当前题目'} 命中本地答案缓存：${cached.answer}，不再请求 AI`);
+        const cacheSubmitted = await Y.Solver.autoSelectAndSubmit(`答案：${cached.answer}`, questionRoot, questionType);
+        if (cacheSubmitted) {
+          answeredKeys.add(questionKey);
+          await Y.Utils.humanPause(1200, 4000);
+          return true;
+        }
+        this.panel.log('缓存答案提交失败，改走正常 AI 答题流程');
       }
 
       const captured = await Y.Solver.captureQuestion(questionRoot);
@@ -44,6 +106,13 @@
           const aiText = await Y.Solver.askAI(questionText, optionCount, captured.image, questionType, captured.element);
           const submitted = await Y.Solver.autoSelectAndSubmit(aiText, questionRoot, questionType);
           if (!submitted) throw new Error('未能选中答案或提交');
+          // 只有真正提交成功才写缓存：提交失败时答案可能是错的/没点上，缓存下来会污染后续运行。
+          // answer 用 autoSelectAndSubmit 同一套提取规则标准化（字母串 / 对 / 错），提不到就不写。
+          const answerToken = Y.Solver.extractAnswerToken(aiText);
+          if (answerToken && questionKey) {
+            Y.Store.setAnswerCache(questionKey, { answer: answerToken, type: questionType, at: Date.now() });
+          }
+          answeredKeys.add(questionKey);
           await Y.Utils.humanPause(1800, 8000);
           return true;
         } catch (err) {
@@ -77,11 +146,13 @@
       const nextBtn = Y.AiWorkspace.getExerciseActionButton(currentRoot, /下一题|下一道|下一步/);
       if (!nextBtn) return false;
       await Y.Utils.humanClick(nextBtn, 1200, 2800);
+      // 比较口径必须和调用方一致（都用 questionStem）。以前这里用 normalizeText(innerText).slice(0,120)，
+      // 和调用方传进来的去空白题干永远不相等，poll 第一次就返回 true，等于根本没检测翻页。
       return Y.Utils.poll(() => {
         const latestRoot = Y.AiWorkspace.getExerciseContainer() || currentRoot;
         const questionRoot = Y.AiWorkspace.getExerciseQuestionBody(latestRoot);
-        const fingerprint = Y.AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
-        return fingerprint && fingerprint !== previousFingerprint;
+        const fingerprint = Y.Solver.questionStem(questionRoot);
+        return Boolean(fingerprint) && fingerprint !== previousFingerprint;
       }, { interval: 500, timeout: 5000 });
     },
     async handleExercise(route) {
@@ -124,10 +195,22 @@
           this.panel.log('换题后稍等再答');
           await Y.Utils.humanPause(2500, 9000);
         }
-        await this.solveExerciseQuestion(currentRoot, `第 ${i + 1} 题`);
+        // 填空/简答这类没有选项的题：没有可点的选项，也不该走「答题后」等待链。
+        // 直接翻页后 continue（solveExerciseQuestion 内有同样的兜底分支）。
+        // 先给一次很短的宽限，避免把选项还没渲染完的选择题当成填空题跳过。
+        await this.waitExerciseChoices(questionRoot);
+        if (!Y.Solver.questionChoices(questionRoot).length) {
+          this.panel.log(`第 ${i + 1} 题没有选项（填空/简答类），直接翻到下一题`);
+          const advanced = await this.advanceExerciseQuestion(questionRoot, fingerprint);
+          previousFingerprint = fingerprint;
+          if (!advanced) break;
+          continue;
+        }
+        const solved = await this.solveExerciseQuestion(currentRoot, `第 ${i + 1} 题`, fingerprint);
         previousFingerprint = fingerprint;
         let shown = null;
         let jumped = false;
+        let confirmed = '';
         await Y.Utils.poll(() => {
           const latestRoot = Y.AiWorkspace.getExerciseQuestionBody(Y.AiWorkspace.getExerciseContainer() || currentRoot);
           const stem = Y.Solver.questionStem(latestRoot);
@@ -136,14 +219,21 @@
             return true;
           }
           shown = Y.Solver.revealedResult(latestRoot);
-          return Boolean(shown);
-        }, { interval: 400, timeout: 8000 });
+          if (shown) return true;
+          // 早退信号保守：出现结果类文本或提交按钮 disabled 就当作已提交，立刻去点下一题，
+          // 不再固定干等 8 秒。本题根本没答成（solved 为 false）时不看提交信号，
+          // 免得把「本来就没交上去」的题当成已提交。
+          confirmed = solved ? this.exerciseSubmitConfirmed(latestRoot) : '';
+          return Boolean(confirmed);
+        }, { interval: 400, timeout: 3000 });
         if (jumped) continue;
         if (shown) {
           await Y.Utils.sleep(1200);
           const latestRoot = Y.AiWorkspace.getExerciseQuestionBody(Y.AiWorkspace.getExerciseContainer() || currentRoot);
           if (Y.Solver.questionStem(latestRoot) !== fingerprint) continue;
           this.panel.log(`这题得分 ${shown.score || '0'}，正确答案 ${shown.answer || '见页面'}，进入下一题`);
+        } else if (confirmed) {
+          this.panel.log(`已确认本题提交（${confirmed}），直接点下一题`);
         } else {
           this.panel.log('这题没有自动进入下一题，改点下一题');
         }

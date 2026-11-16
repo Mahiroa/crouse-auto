@@ -1,7 +1,91 @@
 ((Y) => {
   // 观看缺口补刷与记满
 
+  // ---- 补播闭环的三个常量（3.6.0）----
+  // 冷却窗口：一次补播**真的跑过**、最后还是没记满，这一节 30 分钟内不再重复补。
+  // 真机日志里「第 1 次补播：24 段、共 09:01」跑完只涨 2 个百分点，然后又从头补一轮 ——
+  // 补不动就等一段时间再试，比连着白播 9 分钟强。
+  const CREDIT_COOLDOWN_MS = 30 * 60 * 1000;
+  // 每段补播前的预滚秒数。默认 0：预滚针对的是「seek 后 fp/tp 会一直带下去、每段开头几秒
+  // 可能入不了账」这条【推断】，还没有真机数据证明它有效；而它会把起播点前移到缺口之前，
+  // 回归台的 video-gap-middle 要求「必须跳到缺口起点 5s 附近」，开了就判不过（实测）。
+  // 等真机确认「每段补完确实没进 result」再把这里调到 5 即可，replayGaps / playRange 的
+  // preRoll 参数都还在，不需要改结构。
+  const CREDIT_PRE_ROLL = 0;
+  // 连续几段「播完却没进 result」就判定这一轮白播
+  const CREDIT_MISS_STREAK = 3;
+
+  // 单段核验：这一段补播有没有真的被记账 —— intervals 里存在一段把
+  // [gap.s, min(gap.s + 3, gap.e)] 整个盖住的区间，就算这一段进账了。
+  // 左端给 1 秒容差：VideoLedger.normalize 合并相邻区间用的是 0.5 秒容差，
+  // 再加上平台 result 的右端会比时长多 1~2 秒，边界上本来就有半秒级取整。
+  // 右端只要求盖住缺口开头 3 秒（而不是一直到 gap.e）：心跳大约 5 秒采样一次
+  // （docs/视频观看日志-取证.md §6.6），刚播完那几秒的记录可能还在路上；
+  // 只要缺口开头进了 result，就说明「这一段开始入账了」，没必要把它判成没覆盖。
+  // 【推断】「开头进 result ⇒ 整段会陆续入账」是从 §6.10（被判 Partial data anomaly 也照样
+  // 部分入账）推出来的，没有逐条心跳对账，所以只拿它做「要不要继续播」的止损判据。
+  const gapCovered = (log, gap) => {
+    const intervals = Array.isArray(log?.intervals) ? log.intervals : null;
+    if (!intervals || !gap) return false;
+    const left = Number(gap.s);
+    const right = Number(gap.e);
+    if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+    const target = Math.min(left + 3, right);
+    return intervals.some(item => item
+      && Number(item.s) <= left + 1
+      && Number(item.e) >= target);
+  };
+
   const WorkspaceCreditMixin = {
+    // ---- 补播冷却表 ----
+    // 结构：leafId -> { at, rate }。**只活在 runner 实例的内存里**：刷新页面 / 重开一轮就是空的，
+    // 这是刻意的（也是可以接受的）—— 冷却只用来挡住「同一次运行里反复补同一节」；
+    // 用户手动看完、平台延迟记账这些情况，刷新之后要能重新核对，不该被旧的失败记录一直挡着。
+    creditCooldown() {
+      if (!(this.creditRetryAfter instanceof Map)) this.creditRetryAfter = new Map();
+      return this.creditRetryAfter;
+    },
+    // 冷却还剩多少毫秒；顺手把过期项删掉，避免长跑几十节后 Map 只增不减
+    creditCooldownLeft(leafId) {
+      const table = this.creditCooldown();
+      const key = String(leafId || '');
+      if (!key) return 0;
+      const entry = table.get(key);
+      if (!entry) return 0;
+      const left = Number(entry.at || 0) + CREDIT_COOLDOWN_MS - Date.now();
+      if (left > 0) return left;
+      table.delete(key);
+      return 0;
+    },
+    // 只在「补播跑过、最后还是没记满」时写；成功、快照、被安全核验打断都不写
+    noteCreditFailure(leafId, rate) {
+      const key = String(leafId || '');
+      if (!key) return;
+      const now = Date.now();
+      const table = this.creditCooldown();
+      for (const [id, entry] of table) {
+        if (!entry || Number(entry.at || 0) + CREDIT_COOLDOWN_MS <= now) table.delete(id);
+      }
+      table.set(key, { at: now, rate: rate == null ? null : rate });
+    },
+    // 记满就清掉这一节的冷却：下次真有新缺口时不该被上一轮的失败挡住
+    clearCreditCooldown(leafId) {
+      const key = String(leafId || '');
+      if (!key) return;
+      this.creditCooldown().delete(key);
+    },
+    // 快照早退的统一收口：平台已经冻结这份观看日志，补播改不了记账，直接记 skip 并把 rate 原样交回
+    snapshotSkipCredit(info, title, stepId) {
+      this.panel.log('该视频的观看日志已快照（result 不再更新），补播不会改变记账');
+      this.panel.track({
+        id: `${stepId}-makeup`,
+        kind: 'video',
+        title,
+        status: 'skip',
+        detail: `观看日志已快照，补播不会改变记账（${Y.pctText(info?.rate)}）`
+      });
+      return { verified: false, rate: info ? info.rate : null };
+    },
     // 平台记账没满时把「哪几段没看」说清楚，面板里能直接对照观看日志弹窗
     logVideoGaps(info, prefix = '') {
       if (!info) return;
@@ -25,6 +109,16 @@
       if (!api || !api.enabled) return { verified: false, rate: null };
       const classroomId = this.currentClassroomId();
       if (!classroomId || !route?.leafId) return { verified: false, rate: null };
+      const leafKey = String(route.leafId);
+      // 冷却命中：这一节 30 分钟内已经补过且没记满，直接跳过，连观看日志都不用再读。
+      // 返回上一次的 rate（不是 null）——调用方据此记 skip，不会谎报 done。
+      const cooling = this.creditCooldownLeft(leafKey);
+      if (cooling > 0) {
+        const last = this.creditCooldown().get(leafKey);
+        const lastRate = last && last.rate != null ? last.rate : null;
+        this.panel.log(`本节点 30 分钟内已补过且未记满，先跳过，稍后重试（还剩约 ${Math.ceil(cooling / 60000)} 分钟）`);
+        return { verified: false, rate: lastRate };
+      }
       const readLog = () => (typeof api.videoLog === 'function'
         ? api.videoLog(classroomId, route.leafId)
         : null);
@@ -33,15 +127,28 @@
         // 拿不到观看日志（老接口/权限不足）就退回 3.4.0 的纯 rate 口径，功能不倒退
         return this.ensureVideoCreditedByRate(route, title, stepId);
       }
+      // 快照早退：/video-log/detail/ 返回 is_snapshot 时，平台已经把这份观看日志**冻结**了，
+      // result 不会再更新 —— 这时候补播多少遍都改不了记账，进 3 轮补播纯属白播。
+      // 所以拿到 info 就先看这个开关（api.js 早就解析好了，这里一直没人用）。
+      if (info.snapshot === true) {
+        return this.snapshotSkipCredit(info, title, stepId);
+      }
       if (this.videoFullyCredited(info)) {
+        this.clearCreditCooldown(leafKey);
         this.panel.log(`平台记账已满：${Y.pctText(info.rate)}${info.gapSeconds ? `（残余 ${Y.VideoLedger.mark(info.gapSeconds)}）` : ''}`);
         return { verified: true, rate: info.rate };
       }
       // 平台 30 秒才发一批心跳，刚播完那几十秒可能还在路上，先等一轮再看
       await Y.Utils.sleep(2500);
       const settled = await readLog();
-      if (settled) info = settled;
+      if (settled) {
+        info = settled;
+        if (info.snapshot === true) {
+          return this.snapshotSkipCredit(info, title, stepId);
+        }
+      }
       if (this.videoFullyCredited(info)) {
+        this.clearCreditCooldown(leafKey);
         this.panel.log(`平台记账已满：${Y.pctText(info.rate)}`);
         return { verified: true, rate: info.rate };
       }
@@ -51,6 +158,12 @@
       // 只有「补完一点没涨」时才退到 1 倍速再试一轮。
       let speed = Number(playback.playbackRate) > 0 ? Math.min(Number(playback.playbackRate), 2) : 1;
       let previous = info.gapSeconds;
+      // 单段闭环的状态：
+      //   missStreak —— 连续几段「播完了但这段没进 result」，清零靠「这一段真被覆盖」
+      //   gapProbe   —— 最近一次单段核验读到的日志，判定停止时直接拿它当最新 info，省一次请求
+      let missStreak = 0;
+      let gapProbe = null;
+      let attempted = false;
       for (let pass = 1; pass <= 3; pass++) {
         const gaps = (Array.isArray(info.gaps) ? info.gaps : [])
           .filter(gap => gap && gap.e - gap.s >= Y.VideoLedger.MIN_GAP);
@@ -63,11 +176,48 @@
           detail: `补播没看的 ${gaps.length} 段（${Y.VideoLedger.mark(info.gapSeconds)}，${speed} 倍速）`
         });
         this.panel.log(`第 ${pass} 次补播：${gaps.length} 段、共 ${Y.VideoLedger.mark(info.gapSeconds)}，${speed} 倍速`);
-        const played = await this.replayGaps(gaps, { speed });
+        attempted = true;
+        const played = await this.replayGaps(gaps, {
+          speed,
+          preRoll: CREDIT_PRE_ROLL,
+          // 每段播完核一次「这一段到底进没进 result」。连续 3 段都没进就停：
+          // 为什么是 3 —— 真机那 24 段共 09:01，平均一段约 22 秒，3 段≈67 秒，
+          // 已经跨过心跳 30 秒一个上报批次（§6.5），所以连读 3 次都没有新覆盖，
+          // 就不是「记录还在路上」，而是平台确实没记这一段，再往下播全是白播。
+          // 每段只读一次观看日志（单请求、8 秒超时），不并发。
+          onGapDone: async (i, gap, ok) => {
+            if (!ok) return null;
+            // 稍等一下：刚播完的那一批心跳可能正好要发出去（30 秒窗口，尽力而为）
+            await Y.Utils.sleep(1000);
+            const log = await readLog();
+            if (!log) return null; // 读不到 = 没有信息，不当作「没覆盖」
+            gapProbe = log;
+            if (log.snapshot === true) {
+              this.panel.warn('补播中平台把观看日志置成快照，后面的段不会再记账，停止本轮');
+              return 'stop';
+            }
+            if (gapCovered(log, gap)) {
+              missStreak = 0;
+              return null;
+            }
+            missStreak += 1;
+            this.panel.log(`第 ${i + 1} 段补播后没有出现在观看日志里（连续 ${missStreak}/${CREDIT_MISS_STREAK} 段）`);
+            if (missStreak >= CREDIT_MISS_STREAK) {
+              this.panel.warn('补播对这段没有记账（连续 3 段），停止本轮，避免白播');
+              return 'stop';
+            }
+            return null;
+          }
+        });
         if (this.blockedByHumanCheck) {
           // 走统一收口：置停住标志 + 记 skip + 把「开始刷课」按钮复位成可再点
           // （直接置标志而不复位按钮的话，面板会卡在「刷课中…」，用户点开始只会被忽略）
           this.noteVerificationBlock(title, stepId, '补刷时遇到安全核验');
+          break;
+        }
+        if (played.stopped) {
+          // 已经在单段核验里判定「这一节补不动」：不再等 2 秒重读日志，直接用最后一次核验结果收口
+          if (gapProbe) info = gapProbe;
           break;
         }
         if (!played.ok) {
@@ -82,6 +232,7 @@
         }
         info = after;
         if (this.videoFullyCredited(info)) {
+          this.clearCreditCooldown(leafKey);
           this.panel.log(`补刷完成：平台记账 ${Y.pctText(info.rate)}`);
           this.panel.track({ id: `${stepId}-makeup`, kind: 'video', title, status: 'done', detail: `补播后平台记账 ${Y.pctText(info.rate)}` });
           return { verified: true, rate: info.rate };
@@ -101,6 +252,9 @@
         previous = info.gapSeconds;
       }
       this.panel.track({ id: `${stepId}-makeup`, kind: 'video', title, status: 'skip', detail: `补播后平台记账 ${Y.pctText(info.rate)}` });
+      // 冷却只写「真的补过、最后还是没记满」这一种；被安全核验打断的那一轮不写 ——
+      // 用户处理完核验、点「开始刷课」时要能立刻重试这一节，不能被 30 分钟冷却挡住。
+      if (attempted && !this.blockedByHumanCheck) this.noteCreditFailure(leafKey, info.rate);
       return { verified: false, rate: info.rate };
     },
     // 老口径（拿不到观看日志时的兜底）：只看 rate，缺多少按比例估一个秒数从尾部补。
@@ -168,37 +322,69 @@
     // 为什么 seek 过去是安全的：平台按 timeupdate 采样 cp，只把「连续向前的一小步」并进 result；
     // 跳过去的跨度不算数（前端弹窗原话「观看时有拖拽行为，拖拽部分显示未观看」）。
     // 所以从缺口起点开始连续播，正好把这一段从「未观看」变成「已观看」。
-    async replayGaps(gaps, { speed = 1 } = {}) {
+    //
+    // onGapDone(i, gap, ok)：可选的单段回调，每段播完（ok=true）调一次；返回 'stop' 时
+    // 立刻中止剩余段并把这个意图带回给调用方（{ stopped: true }）。核验逻辑放在调用方，
+    // 这里只管「播一段 → 问一句 → 要不要继续」。
+    async replayGaps(gaps, { speed = 1, preRoll = CREDIT_PRE_ROLL, onGapDone = null } = {}) {
       const list = (Array.isArray(gaps) ? gaps : []).filter(gap => gap && gap.e - gap.s >= Y.VideoLedger.MIN_GAP);
-      if (!list.length) return { ok: true, played: 0, done: 0, total: 0 };
+      if (!list.length) return { ok: true, played: 0, done: 0, total: 0, stopped: false };
       await this.waitPlayerReady(15000);
       const media = Y.AiWorkspace.getMedia();
-      if (!media) return { ok: false, played: 0, done: 0, total: list.length };
+      if (!media) return { ok: false, played: 0, done: 0, total: list.length, stopped: false };
       const targetSpeed = Number(speed) > 0 ? Math.min(Number(speed), 2) : 1;
+      const rollSeconds = Math.max(0, Number(preRoll) || 0);
       const prevSpeed = Number(media.playbackRate) || 1;
       let done = 0;
+      let stopped = false;
       try {
         for (let i = 0; i < list.length; i++) {
           const gap = list[i];
-          this.panel.log(`补播第 ${i + 1}/${list.length} 段：${Y.VideoLedger.mark(gap.s)} → ${Y.VideoLedger.mark(gap.e)}`
-            + `（${Math.round(gap.e - gap.s)} 秒）`);
-          const ok = await this.playRange(gap, { speed: targetSpeed });
+          // 起播点比缺口左端再往前 rollSeconds 秒（交界处已看过的部分），只为了「先有连续播放」。
+          // 预滚区间不是要记账的目标：终点仍然只到 gap.e + 0.5，核验也只看缺口自己的开头。
+          const from = Math.max(0, (Number(gap.s) || 0) - rollSeconds);
+          this.panel.log(`补播第 ${i + 1}/${list.length} 段：${Y.VideoLedger.mark(from)} → ${Y.VideoLedger.mark(gap.e)}`
+            + `（缺口 ${Y.VideoLedger.mark(gap.s)} → ${Y.VideoLedger.mark(gap.e)}，${Math.round(gap.e - gap.s)} 秒`
+            + `${rollSeconds > 0 ? `；前 ${Math.round(rollSeconds)} 秒是预滚，不算要记账的目标` : ''}）`);
+          const ok = await this.playRange(gap, { speed: targetSpeed, preRoll: rollSeconds });
           if (this.blockedByHumanCheck) break;
           if (!ok) {
             this.panel.warn(`第 ${i + 1} 段没播成（播放器不配合或卡住），先跳过这一段`);
             continue;
           }
           done += 1;
+          // 单段闭环：播完立刻核一次，判别对象是「单段」而不是整轮，所以要在这里问
+          if (typeof onGapDone === 'function') {
+            let verdict = null;
+            try {
+              verdict = await onGapDone(i, gap, ok);
+            } catch (err) {
+              // 核验本身出错不能把整条补播链打断，按「没有信息」处理
+              this.panel.log(`单段核验异常，按未核对处理：${err?.message || err}`);
+            }
+            if (verdict === 'stop') {
+              stopped = true;
+              break;
+            }
+          }
         }
-        return { ok: done > 0, played: 0, done, total: list.length };
+        return { ok: done > 0, played: 0, done, total: list.length, stopped };
       } finally {
         try { media.playbackRate = prevSpeed; } catch (_) { }
         try { media.pause(); } catch (_) { }
       }
     },
-    // 把 [gap.s, gap.e) 真正播完。返回 false 表示这段没播成（seek 被回滚 / 卡住 / 播到结尾）。
-    async playRange(gap, { speed = 1 } = {}) {
-      const startAt = Math.max(0, Number(gap.s) || 0);
+    // 把 [gap.s - preRoll, gap.e) 真正播完。返回 false 表示这段没播成（seek 被回滚 / 卡住 / 播到结尾）。
+    async playRange(gap, { speed = 1, preRoll = CREDIT_PRE_ROLL } = {}) {
+      const rollSeconds = Math.max(0, Number(preRoll) || 0);
+      // 预滚默认 0（见 CREDIT_PRE_ROLL）。真要开的时候，5 秒这个取值的理由是：
+      // seek 是「拖拽」，取证 §6.4 实测 seek 那一条记录里的 fp/tp 会一直带到后续所有记录上；
+      // 如果 seek 落地就正好停在缺口左端开播，前面几秒的采样还带着「刚拖过来」的痕迹，
+      // 这一段可能播了却进不了 result。先往前多播 5 秒（≈ 心跳的采样周期，§6.6：5 秒一次）
+      // 能让播放器回到正常前进节奏，再进入真正要记账的缺口。
+      // 【推断】5 是折中值：再短盖不满一个采样周期；再长（比如按上报批次取 30 秒）每段都要多播
+      // 十几秒，24 段就是好几分钟白播，反而比现在更糟。
+      const startAt = Math.max(0, (Number(gap.s) || 0) - rollSeconds);
       const endAt = Number(gap.e);
       // seek 是「拖拽」，位置可能被播放器按防拖拽策略回滚；回滚了就重试一次，仍不行就放弃这一段
       const seekTo = async value => {
@@ -215,7 +401,7 @@
         if (!await seekTo(startAt)) {
           await Y.Utils.sleep(200);
           if (!await seekTo(startAt)) {
-            this.panel.warn(`播放器不接受跳到 ${Y.VideoLedger.mark(startAt)}（可能是防拖拽），这一段跳过`);
+            this.panel.warn(`播放器不接受跳到起播点 ${Y.VideoLedger.mark(startAt)}（含预滚，可能是防拖拽），这一段跳过`);
             return false;
           }
         }

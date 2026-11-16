@@ -293,6 +293,25 @@
     questionStem(element) {
       return this.stripReviewNoise(element?.innerText || '').replace(/\s+/g, '').slice(0, 120);
     },
+    // 题干 + 选项文本一起做指纹。只拿题干当 key 时，同一道题只要选项顺序变了
+    // （平台抽题、同题干不同卷面）就会命中上一次的缓存答案，把 A 的答案点到别的选项上；
+    // 选项文本 join('|') 参与哈希后，顺序一变 key 就变，宁可退回问 AI 也不错选。
+    // FNV-1a 32bit：Math.imul 保住 32 位乘法精度，不引入依赖，输出 8 位小写 hex。
+    questionFingerprint(itemBodyElement) {
+      if (!itemBodyElement) return '';
+      const stem = this.questionStem(itemBodyElement);
+      const options = this.questionChoices(itemBodyElement)
+        .map(choice => String(choice.innerText || '').replace(/\s+/g, ''))
+        .join('|');
+      if (!stem && !options) return '';
+      const raw = `${stem}#${options}`;
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < raw.length; i++) {
+        hash ^= raw.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+      return (hash >>> 0).toString(16).padStart(8, '0');
+    },
     questionTypeName(questionType) {
       if (questionType === 'multiple') return '多选题';
       if (questionType === 'judge') return '判断题';
@@ -373,13 +392,24 @@ ${questionText}
 `;
       return this.requestChat(prompt, "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。搜索结果只在与本题一致时才采用。", answerConf);
     },
-    async autoSelectAndSubmit(aiResponse, itemBodyElement, questionType = 'single') {
+    // 从模型正文里提取答案 token（字母串 / 对 / 错）。autoSelectAndSubmit 与答案缓存共用它：
+    // 两处各写一份正则时一旦分叉，就会出现「缓存里存的 A、实际点的是 AB」这种脏缓存。
+    extractAnswerToken(aiResponse) {
       const match = String(aiResponse || '').match(/(?:正确)?答案[：:]?\s*([A-F]+(?:[,，][A-F]+)*|[对错]|正确|错误)/i);
-      if (!match) {
+      if (!match) return '';
+      const raw = match[1].replace(/[,，]/g, '').trim();
+      if (!raw) return '';
+      // 判断题统一成单字「对 / 错」，选择题统一成大写字串，缓存里只存这个标准形态。
+      if (/^(正确|对|错误|错)$/.test(raw)) return /^(正确|对)$/.test(raw) ? '对' : '错';
+      return raw.toUpperCase();
+    },
+    async autoSelectAndSubmit(aiResponse, itemBodyElement, questionType = 'single') {
+      const answerToken = this.extractAnswerToken(aiResponse);
+      if (!answerToken) {
         Y.panel.log('⚠️ 未提取到有效选项，请人工检查');
         return false;
       }
-      let answerRaw = match[1].replace(/[,，]/g, '').trim();
+      let answerRaw = answerToken;
       const map = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5 };
       const choices = this.questionChoices(itemBodyElement);
       if (choices.length < 2) {

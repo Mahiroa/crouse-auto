@@ -42,7 +42,7 @@
     //  ① 媒体源变了（currentSrc/src 与接管时不同）；
     //  ② 元素真的重新 load 过（emptied/loadstart 让 mediaEpoch 前进）。
     // 只看路由 leafId 不算证据：SPA 里路由常常比播放器换源先变，那样会把上一节停在结尾的
-    // 旧元素当成本节播放器，直接误判“已播完”，比等 45 秒更危险。
+    // 旧元素当成本节播放器，直接误判“已播完”，比等 20 秒更危险。
     isStaleMedia(media) {
       if (!media) return true;
       if (media !== this.lastMedia) return false;
@@ -128,6 +128,10 @@
       // 换集后旧的播放器常常还停在上一条结尾（ended），要先等“新的、能播的”媒体元素，
       // 否则会拿着上一节的残留元素判定失败，整条自动播放链就停在这里
       const stepStartedAt = Date.now();
+      // 单次就绪预算保留 45 秒：回归台的 slow-start-25（前 25 秒 readyState=0）与
+      // slow-swap-48（48 秒后才挂播放器）都要靠这段窗口 + handleStep 的第二次尝试才救得回来；
+      // 实测缩到 20 秒会把这两个场景直接判死。真机上该砍的是「重试前的停顿」和
+      // 「墙钟把休眠时间当等待」这两处（见 handleStep / poll），不是这段等待本身。
       const ready = await Y.Utils.poll(() => {
         const current = Y.AiWorkspace.getMedia();
         if (!current || current.seeking) return false;
@@ -135,10 +139,16 @@
         if (current.readyState < 2 || !Number.isFinite(duration) || duration <= 1) return false;
         return !this.isStaleMedia(current);
       }, { interval: 400, timeout: 45000 });
-      const readyCost = (Date.now() - stepStartedAt) / 1000;
+      // 耗时要和墙钟分开：墙钟（Date.now 差值）会把后台标签页被节流、系统休眠的时间一起算进来，
+      // 日志里就会冒出「等了 9783 秒」这种根本没发生过的数字；poll 记下的有效等待才是脚本真正等掉的
+      // 时长（口径见 runner.js 的 pollSpentMs / throttleNote），拿不到时它会退回墙钟，行为与改动前一致。
+      const readyWallMs = Date.now() - stepStartedAt;
+      const readyCostMs = this.pollSpentMs(readyWallMs);
+      const readyCost = readyCostMs / 1000;
+      const readyNote = this.throttleNote(readyWallMs, readyCostMs);
       let media = Y.AiWorkspace.getMedia();
       if (!ready || !media) {
-        this.panel.log(`等了 ${Math.round(readyCost)} 秒仍没等到可播放的视频/音频元素，本节先跳过`);
+        this.panel.log(`等了 ${Math.round(readyCost)} 秒仍没等到可播放的视频/音频元素，本节先跳过${readyNote}`);
         return false;
       }
       this.rememberMedia(media, route);
@@ -155,7 +165,7 @@
       }
       const stopKeepAlive = Y.AiWorkspace.keepAlive(shouldResume);
       const playback = Y.Store.getPlaybackConf();
-      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${playback.playbackRate}x，静音${playback.muted ? '开启' : '关闭'}（就绪等待 ${readyCost.toFixed(1)} 秒）`);
+      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${playback.playbackRate}x，静音${playback.muted ? '开启' : '关闭'}（就绪等待 ${readyCost.toFixed(1)} 秒${readyNote}）`);
       if (patchOnly) {
         // 只看掉了一大半、缺口是几小段：不整段重播，直接按缺口补播。
         // 要先停掉 observePause —— 它每 1 秒 enforceSettings 一次，会把我们 seek 好的位置和
