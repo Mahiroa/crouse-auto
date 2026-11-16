@@ -1,6 +1,6 @@
 {
   "name": "雨课堂刷课助手",
-  "version": "3.8.0",
+  "version": "3.8.1",
   "header": "userscript.header.txt",
   "entry": "Y.boot();",
   "source": "雨课堂刷课助手-3.1.32.js",
@@ -126,6 +126,10 @@
     {
       "file": "panel/markup.js",
       "title": "面板静态模板（HTML/CSS）"
+    },
+    {
+      "file": "panel/log.js",
+      "title": "面板日志渲染（时间/分组/等级，Y.PanelLog）"
     },
     {
       "file": "panel/panel.js",

@@ -327,7 +327,7 @@
         .info {
           margin: 0 0 6px;
           padding: 0;
-          max-height: 112px;
+          max-height: 132px;
           overflow-y: auto;
           list-style: none;
         }
@@ -335,6 +335,45 @@
         .info li:last-child { margin-bottom: 0; }
         .info li.log-warn { color: var(--warn); }
         .info li.log-error { color: var(--danger); }
+
+        /* 结构化日志：时间 + 分组 + 正文，等级决定正文颜色 */
+        .info li.log-line { display: flex; gap: 5px; align-items: baseline; }
+        .info li.log-line[hidden] { display: none; }
+        .log-time {
+          flex: none;
+          color: #b0b9c6;
+          font-size: 9.5px;
+          font-variant-numeric: tabular-nums;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        .log-tag {
+          flex: none;
+          padding: 0 4px;
+          border-radius: 3px;
+          background: #eef2f7;
+          color: #5b6b82;
+          font-size: 9px;
+          line-height: 14px;
+        }
+        .log-text { flex: 1; min-width: 0; word-break: break-word; }
+        .info li.lv-ok .log-text { color: #15803d; }
+        .info li.lv-warn .log-text { color: #b45309; }
+        .info li.lv-error .log-text { color: #b91c1c; font-weight: 600; }
+        .info li.lv-step .log-text { color: #1d4ed8; }
+        .info li.lv-ai .log-text { color: #7c3aed; }
+        .log-filters { display: inline-flex; gap: 4px; }
+        .log-filter {
+          border: 1px solid #dbe2ec;
+          background: #fff;
+          color: #64748b;
+          border-radius: 999px;
+          font-size: 9.5px;
+          line-height: 14px;
+          padding: 0 6px;
+          cursor: pointer;
+        }
+        .log-filter:hover { border-color: #bcd0f5; color: var(--brand-strong); }
+        .log-filter.on { border-color: #2f6fed; background: #eef4ff; color: #1d4ed8; font-weight: 600; }
 
         /* 底部操作栏 */
         .footer {
@@ -731,7 +770,15 @@
           </section>
 
           <details class="runlog" id="runlog">
-            <summary><span>运行日志</span><span class="log-count" id="log-count">0</span></summary>
+            <summary>
+              <span>运行日志</span>
+              <span class="log-filters" role="group" aria-label="日志筛选">
+                <button type="button" class="log-filter on" data-filter="all">全部</button>
+                <button type="button" class="log-filter" data-filter="warn">警告</button>
+                <button type="button" class="log-filter" data-filter="error">错误</button>
+              </span>
+              <span class="log-count" id="log-count">0</span>
+            </summary>
             <ul class="info" id="info"></ul>
           </details>
         </main>

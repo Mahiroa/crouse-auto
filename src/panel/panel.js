@@ -314,23 +314,25 @@
     };
     renderTrail(Y.Store.getTrail());
 
-    // ---- 日志（DOM 上限 200 条，长时间刷课不会越积越卡） ----
-    const appendLog = (message, kind) => {
-      const li = doc.createElement('li');
-      li.innerText = String(message ?? '');
-      if (kind === 'warn') li.className = 'log-warn';
-      if (kind === 'error') li.className = 'log-error';
-      ui.info.appendChild(li);
-      while (ui.info.children.length > 200) ui.info.firstElementChild.remove();
-      ui.logCount.textContent = String(ui.info.children.length);
-      ui.info.lastElementChild?.scrollIntoView?.({ block: 'nearest' });
-    };
-    const log = message => appendLog(message, 'log');
-    const warn = message => appendLog('⚠️ ' + message, 'warn');
+    // ---- 日志（结构化：时间 + 分组 + 等级配色；DOM 上限 200 条，长时间刷课不会越积越卡） ----
+    const logView = Y.PanelLog.create({ list: ui.info, counter: ui.logCount, doc });
+    const appendLog = (message, kind) => logView.push(message, kind ? { level: kind } : {});
+    const log = (message, options) => logView.push(message, options || {});
+    const warn = message => logView.push('⚠️ ' + message, { level: 'warn' });
     const error = message => {
-      appendLog('🚨 ' + message, 'error');
+      logView.push('🚨 ' + message, { level: 'error' });
       setBadge('异常', 'error');
     };
+    // 筛选：全部 / 只看警告（含错误）/ 只看错误。按钮在 summary 里，点击不能把 details 折叠掉
+    const logFilterButtons = [...doc.querySelectorAll('.log-filter')];
+    logFilterButtons.forEach(button => {
+      button.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        logFilterButtons.forEach(item => item.classList.toggle('on', item === button));
+        logView.setFilter(button.dataset.filter || 'all');
+      };
+    });
 
     // ---- 设置读取 / 快捷条 ----
     const defaultAI = { url: 'https://api.deepseek.com/chat/completions', key: 'sk-xxxxxxx', model: 'deepseek-flash', apiFormat: 'openai', authMethod: 'bearer', thinkingEffort: 'low', userAgent: 'Yuketang Course Helper' };
@@ -684,6 +686,10 @@
       log,
       warn,
       error,
+      // 结构化日志：stage('答题') 之后的行都归到「答题」分组，stage('') 复位
+      stage: name => logView.stage(name),
+      logCounts: () => logView.counts(),
+      clearLog: () => logView.clear(),
       track,
       showQuestion,
       noteAnswer,
