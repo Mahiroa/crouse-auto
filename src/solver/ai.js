@@ -263,10 +263,126 @@
       }
       return [];
     },
+    // 题目节点可能在两次读取之间被平台重渲染换掉（Vue 复用 DOM 时会 detach 旧节点）：
+    // 旧引用上的 querySelectorAll 一律返回空，于是「选项明明在页面上」却被判成未找到容器。
+    // 真机日志里同一题连续 3 次「⚠️ 未找到选项容器」就是这么来的，所以每次读写前都重新解析一次。
+    liveQuestionRoot(element) {
+      if (element && element.isConnected) return element;
+      try {
+        const container = Y.AiWorkspace.getExerciseContainer();
+        return Y.AiWorkspace.getExerciseQuestionBody(container) || element || null;
+      } catch (_) {
+        return element || null;
+      }
+    },
+    // 填空题的输入框：真机上是 <input class="blank-item-dynamic" placeholder="输入答案">。
+    // 先按这几个标记找；找不到再退回题干容器里的普通文本框（排除搜索/昵称这类干扰项）。
+    fillInputs(itemBodyElement) {
+      if (!itemBodyElement) return [];
+      const scope = itemBodyElement.closest?.('.container-problem') || itemBodyElement;
+      const marked = [...scope.querySelectorAll('input.blank-item-dynamic, input[placeholder*="输入答案"], input[placeholder*="填空"]')];
+      const loose = [...scope.querySelectorAll('input[type="text"], input:not([type])')]
+        .filter(el => !/search|搜索|昵称|手机号|密码/.test(String(el.getAttribute('placeholder') || '')));
+      const usable = el => Boolean(el) && !el.disabled && !el.readOnly;
+      const candidates = (marked.length ? marked : loose).filter(usable);
+      if (!candidates.length) return [];
+      let visible = [];
+      try {
+        visible = candidates.filter(el => Y.AiWorkspace.isVisibleElement(el));
+      } catch (_) {}
+      // jsdom / 无布局环境里 getBoundingClientRect 恒为 0，全被判不可见时退回「未禁用即算可用」，
+      // 否则填空题在回归台里永远识别不到（真机上这一步仍然按可见性过滤）
+      return visible.length ? visible : candidates;
+    },
+    // 填空题答案：模型被要求输出「答案：市场|社会」。这里按 |、｜、；、换行切分，
+    // 不按逗号切（「市场，社会」这种答案本身可能就带逗号）。
+    extractFillAnswer(aiResponse, blankCount = 1) {
+      const raw = String(aiResponse || '').replace(/\r\n?/g, '\n').replace(/```[\w-]*\s*/g, '').replace(/```/g, '').trim();
+      const hit = raw.match(/(?:正确)?答案\s*[：:]\s*([\s\S]*)/);
+      let body = String(hit ? hit[1] : raw).split('\n')[0].trim();
+      body = body.replace(/^[\s"'“”‘’【\[（(]+/, '').replace(/[\s"'“”‘’】\]）)]+$/, '').trim();
+      if (!body) return [];
+      const parts = body.split(/\s*[|｜]\s*|；|;/).map(item => item.trim()).filter(Boolean);
+      if (blankCount <= 1) return [body.replace(/\s*[|｜].*$/, '').trim() || body];
+      return parts.slice(0, blankCount);
+    },
+    // 提交按钮：选择题和填空题共用。先在自己的容器里找，再退到作业容器/整页，
+    // 判据是「可见 + 文本像提交」，不用「按钮消失」这种易误判的信号。
+    findSubmitButton(scope) {
+      const element = this.liveQuestionRoot(scope);
+      const ownerDocument = element?.ownerDocument || document;
+      let container = null;
+      try {
+        container = Y.AiWorkspace.getExerciseContainer();
+      } catch (_) {}
+      const roots = [element?.parentElement, element, container, ownerDocument].filter(Boolean);
+      const matchText = text => /提交|保存|确认|确定|提交答案/.test(text);
+      // innerText 在无布局环境（jsdom）里是 undefined，用 textContent 兜底；真机上 innerText 有值，
+      // 隐藏元素仍会拿到空串，不会被这里误认成可点按钮（后面还有 offsetParent 判据）。
+      const labelOf = btn => btn.innerText ?? btn.textContent ?? '';
+      for (const root of roots) {
+        const local = root.querySelectorAll('button, .el-button, [role="button"]');
+        for (const btn of local) {
+          if (btn.offsetParent !== null && matchText(labelOf(btn))) return btn;
+        }
+      }
+      const global = ownerDocument.querySelectorAll('.el-button.el-button--primary.el-button--medium');
+      for (const btn of global) {
+        if (matchText(labelOf(btn)) && btn.offsetParent !== null) return btn;
+      }
+      return null;
+    },
+    // 填空题：把答案按空逐个填进 input，再点提交。
+    // 填值用 Y.AiWorkspace.setFieldValue（走原生 setter + input/change 事件，Vue 才认）。
+    async fillAndSubmit(aiResponse, itemBodyElement) {
+      const scope = this.liveQuestionRoot(itemBodyElement);
+      const inputs = this.fillInputs(scope);
+      if (!inputs.length) {
+        Y.panel.log('⚠️ 未找到填空输入框');
+        return false;
+      }
+      const answers = this.extractFillAnswer(aiResponse, inputs.length);
+      if (!answers.length) {
+        Y.panel.log('⚠️ 未提取到填空答案，请人工检查');
+        return false;
+      }
+      Y.panel.log(`✅ 填空题（${inputs.length} 个空），填入：${answers.join(' / ')}`);
+      if (answers.length < inputs.length) {
+        Y.panel.log(`提示：模型只给出 ${answers.length} 个答案，其余 ${inputs.length - answers.length} 个空留空`);
+      }
+      for (let i = 0; i < inputs.length; i++) {
+        const value = answers[i] || '';
+        if (!value) continue;
+        try {
+          Y.AiWorkspace.setFieldValue(inputs[i], value);
+        } catch (err) {
+          Y.panel.log(`⚠️ 第 ${i + 1} 个空填值失败：${err?.message || err}`);
+          return false;
+        }
+        Y.panel.log(`第 ${i + 1} 个空 ← ${value}`);
+        await Y.Utils.humanPause(200, 600);
+      }
+      Y.panel.noteAnswer(answers.join(' / ').slice(0, 40));
+      const submitBtn = this.findSubmitButton(scope);
+      if (!submitBtn) {
+        Y.panel.log('⚠️ 未找到提交按钮，本题按未提交处理');
+        return false;
+      }
+      Y.panel.log('正在提交...');
+      await Y.Utils.humanPause(800, 2800);
+      const submitted = await Y.Utils.humanClick(submitBtn, 1800, 5600);
+      if (!submitted) {
+        Y.panel.log('⚠️ 提交按钮的点击被安全核验拦截，本题未提交');
+        return false;
+      }
+      return true;
+    },
     detectQuestionType(itemBodyElement) {
       const choices = this.questionChoices(itemBodyElement);
+      // 没有选项、但有填空输入框：这是填空题，不是「还没渲染出来的选择题」
+      if (!choices.length && this.fillInputs(itemBodyElement).length) return 'fill';
       const hasCheckbox = choices.some(choice => choice.matches('.el-checkbox, [role="checkbox"]') || choice.querySelector('.el-checkbox, input[type="checkbox"], [role="checkbox"]'));
-      const labels = choices.map(choice => (choice.innerText || '').replace(/\s+/g, ''));
+      const labels = choices.map(choice => String(choice.innerText ?? choice.textContent ?? '').replace(/\s+/g, ''));
       const polarity = text => {
         if (/不正确|不对|错误|错|否|False/i.test(text)) return 'false';
         if (/正确|对|是|True/i.test(text)) return 'true';
@@ -315,9 +431,17 @@
     questionTypeName(questionType) {
       if (questionType === 'multiple') return '多选题';
       if (questionType === 'judge') return '判断题';
+      if (questionType === 'fill') return '填空题';
       return '单选题';
     },
     questionTypeRule(questionType, optionCount) {
+      if (questionType === 'fill') {
+        const blanks = Number(optionCount) > 0 ? Number(optionCount) : 1;
+        return `这是填空题，共有 ${blanks} 个空。只输出答案本身，不要解释、不要加引号、不要写解析。`
+          + (blanks > 1
+            ? `按题目里空格出现的顺序用 | 分隔，例如：答案：市场|社会`
+            : '例如：答案：市场。答案字数按题目括号里的提示（如「两个字」）执行。');
+      }
       const maxChar = String.fromCharCode(65 + Math.max(optionCount, 1) - 1);
       const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
       if (questionType === 'multiple') return `这是多选题，有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}。少选不得分，每个正确选项都要选上，字母连写，例如 ABCD。`;
@@ -332,6 +456,13 @@
       const waitMs = Y.Utils.randInt(5000, 16000);
       Y.panel.log(`${prefix}，${Math.round(waitMs / 1000)} 秒后开始搜索并提交`);
       await Y.Utils.sleep(waitMs);
+    },
+    // 系统提示按题型切换：填空题要的是「答案文本」，不是字母
+    answerSystemPrompt(questionType) {
+      if (questionType === 'fill') {
+        return '你是做题助手，只输出填空答案本身；多个空按顺序用 | 分隔。不要解释、不要引号、不要写解析、不要复述题目。';
+      }
+      return "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。搜索结果只在与本题一致时才采用。";
     },
     async askAI(questionText, optionCount = 0, image = '', questionType = 'single', element = null) {
       const answerConf = this.answerConf();
@@ -375,7 +506,7 @@
 ${restated}
 ${evidence ? `搜索结果：\n${evidence}` : ''}
 `;
-        return this.requestChat(prompt, '你只输出答案。判断题输出对或错，选择题输出字母。搜索结果只在与本题一致时才采用。', answerConf);
+        return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf);
       }
       Y.panel.showQuestion(questionText);
       await this.waitBeforeSearch('还原后的题目已写在上方卡片');
@@ -390,7 +521,7 @@ ${evidence ? `搜索结果：\n${evidence}` : ''}
 ${evidence ? `搜索结果：\n${evidence}\n` : ''}题目内容：
 ${questionText}
 `;
-      return this.requestChat(prompt, "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。搜索结果只在与本题一致时才采用。", answerConf);
+      return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf);
     },
     // 从模型正文里提取答案 token（字母串 / 对 / 错）。autoSelectAndSubmit 与答案缓存共用它：
     // 两处各写一份正则时一旦分叉，就会出现「缓存里存的 A、实际点的是 AB」这种脏缓存。
@@ -404,6 +535,10 @@ ${questionText}
       return raw.toUpperCase();
     },
     async autoSelectAndSubmit(aiResponse, itemBodyElement, questionType = 'single') {
+      // 每次提交前重新解析一次题目节点：重试之间平台可能已经把旧节点换掉，
+      // 旧引用上的查询会全部落空（真机「未找到选项容器」连续 3 次的根因）。
+      const scope = this.liveQuestionRoot(itemBodyElement);
+      if (questionType === 'fill') return this.fillAndSubmit(aiResponse, scope);
       const answerToken = this.extractAnswerToken(aiResponse);
       if (!answerToken) {
         Y.panel.log('⚠️ 未提取到有效选项，请人工检查');
@@ -411,7 +546,7 @@ ${questionText}
       }
       let answerRaw = answerToken;
       const map = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5 };
-      const choices = this.questionChoices(itemBodyElement);
+      const choices = this.questionChoices(scope);
       if (choices.length < 2) {
         Y.panel.log('⚠️ 未找到选项容器');
         return false;
@@ -475,22 +610,7 @@ ${questionText}
       // 选项都点到了才把 trail 标成 done：以前在任何点击之前就 noteAnswer，
       // 一旦选项/提交被安全核验拦下，面板仍显示“已作答”，实际什么都没交。
       Y.panel.noteAnswer(answerRaw);
-      const submitBtn = (() => {
-        const ownerDocument = itemBodyElement.ownerDocument || document;
-        const roots = [itemBodyElement.parentElement, itemBodyElement, ownerDocument].filter(Boolean);
-        const matchText = text => /提交|保存|确认|确定|提交答案/.test(text);
-        for (const root of roots) {
-          const local = root.querySelectorAll('button, .el-button, [role="button"]');
-          for (const btn of local) {
-            if (btn.offsetParent !== null && matchText(btn.innerText || '')) return btn;
-          }
-        }
-        const global = ownerDocument.querySelectorAll('.el-button.el-button--primary.el-button--medium');
-        for (const btn of global) {
-          if (matchText(btn.innerText || '') && btn.offsetParent !== null) return btn;
-        }
-        return null;
-      })();
+      const submitBtn = this.findSubmitButton(scope);
       if (!submitBtn) {
         // 找不到提交按钮就不能假定已提交：上层 `if (!submitted) throw` 必须生效，
         // 否则面板会记成功但实际没交卷（审查报告口径：未点到提交返回 false）。

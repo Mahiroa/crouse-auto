@@ -34,6 +34,8 @@
     // 真的没有选项才按填空/简答翻页；宽限命中就正常答题，不会把刚打开的选择题跳过。
     async waitExerciseChoices(questionRoot) {
       if (Y.Solver.questionChoices(questionRoot).length) return true;
+      // 填空题本来就没有选项：有填空框就不用再等选项渲染
+      if (Y.Solver.fillInputs(questionRoot).length) return true;
       return Y.Utils.poll(() => Y.Solver.questionChoices(questionRoot).length > 0, { interval: 250, timeout: 1200 });
     },
     async solveExerciseQuestion(root, label = '', fingerprint = '') {
@@ -50,13 +52,14 @@
       // 选项还没渲染出来时先宽限等一下，再决定是不是真的没有选项。
       if (!Y.Solver.questionChoices(questionRoot).length) await this.waitExerciseChoices(questionRoot);
       const choices = Y.Solver.questionChoices(questionRoot);
-      const optionCount = choices.length;
+      // 填空题没有选项，但「空的数量」要传给模型（决定它输出几个答案）
+      const blanks = Y.Solver.fillInputs(questionRoot);
+      const optionCount = choices.length || blanks.length;
       const questionType = Y.Solver.detectQuestionType(questionRoot);
-      // 填空/简答这类没有选项的题没有可点的东西：以前这里 return false，调用方仍会走
-      // 「答题后」等待链（8 秒 + 4 秒 + 5 秒），真机日志里每份作业的第一题都卡死在这里。
-      // 现在直接点下一题，并把题干指纹传下去，避免同一题被当成新题反复处理。
+      // 既没有选项、也没有填空输入框：这才是「没有可作答的东西」（简答/主观题），直接翻页。
+      // 以前只要没有选项就翻页，结果填空题（input.blank-item-dynamic）被整页跳过。
       if (!optionCount) {
-        this.panel.log(`${label || '当前题目'} 没有选项（填空/简答类），直接翻到下一题`);
+        this.panel.log(`${label || '当前题目'} 没有选项也没有填空框（简答/其他题型），直接翻到下一题`);
         await this.advanceExerciseQuestion(questionRoot, fingerprint);
         return true;
       }
@@ -101,16 +104,32 @@
       const maxRetry = 3;
       for (let retryCount = 0; retryCount < maxRetry; retryCount++) {
         try {
+          // 重试之间平台可能已经重渲染题目节点：每次都重新解析，别拿旧引用去查选项。
+          // 真机日志里同一题连续 3 次「⚠️ 未找到选项容器」就是旧节点被换掉导致的。
+          const liveRoot = Y.Solver.liveQuestionRoot(questionRoot);
+          const liveType = Y.Solver.detectQuestionType(liveRoot) || questionType;
+          const liveCount = Y.Solver.questionChoices(liveRoot).length
+            || Y.Solver.fillInputs(liveRoot).length
+            || optionCount;
           if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
-          this.panel.log(`当前是${Y.Solver.questionTypeName(questionType)}`);
-          const aiText = await Y.Solver.askAI(questionText, optionCount, captured.image, questionType, captured.element);
-          const submitted = await Y.Solver.autoSelectAndSubmit(aiText, questionRoot, questionType);
+          this.panel.log(`当前是${Y.Solver.questionTypeName(liveType)}`);
+          const aiText = await Y.Solver.askAI(questionText, liveCount, captured.image, liveType, captured.element || liveRoot);
+          const submitted = await Y.Solver.autoSelectAndSubmit(aiText, liveRoot, liveType);
           if (!submitted) throw new Error('未能选中答案或提交');
           // 只有真正提交成功才写缓存：提交失败时答案可能是错的/没点上，缓存下来会污染后续运行。
-          // answer 用 autoSelectAndSubmit 同一套提取规则标准化（字母串 / 对 / 错），提不到就不写。
-          const answerToken = Y.Solver.extractAnswerToken(aiText);
-          if (answerToken && questionKey) {
-            Y.Store.setAnswerCache(questionKey, { answer: answerToken, type: questionType, at: Date.now() });
+          // 选择题存字母 token，填空题存按空拼起来的答案（多个空用 | 分隔）。
+          if (questionKey) {
+            if (liveType === 'fill') {
+              const fillAnswers = Y.Solver.extractFillAnswer(aiText, liveCount);
+              if (fillAnswers.length) {
+                Y.Store.setAnswerCache(questionKey, { answer: fillAnswers.join('|'), type: 'fill', at: Date.now() });
+              }
+            } else {
+              const answerToken = Y.Solver.extractAnswerToken(aiText);
+              if (answerToken) {
+                Y.Store.setAnswerCache(questionKey, { answer: answerToken, type: liveType, at: Date.now() });
+              }
+            }
           }
           answeredKeys.add(questionKey);
           await Y.Utils.humanPause(1800, 8000);
@@ -196,11 +215,13 @@
           await Y.Utils.humanPause(2500, 9000);
         }
         // 填空/简答这类没有选项的题：没有可点的选项，也不该走「答题后」等待链。
-        // 直接翻页后 continue（solveExerciseQuestion 内有同样的兜底分支）。
+        // 但填空题有 input 可以作答（blank-item-dynamic），只有连填空框都没有才翻页。
         // 先给一次很短的宽限，避免把选项还没渲染完的选择题当成填空题跳过。
         await this.waitExerciseChoices(questionRoot);
-        if (!Y.Solver.questionChoices(questionRoot).length) {
-          this.panel.log(`第 ${i + 1} 题没有选项（填空/简答类），直接翻到下一题`);
+        const hasChoices = Y.Solver.questionChoices(questionRoot).length > 0;
+        const hasBlanks = Y.Solver.fillInputs(questionRoot).length > 0;
+        if (!hasChoices && !hasBlanks) {
+          this.panel.log(`第 ${i + 1} 题没有选项也没有填空框（简答/其他题型），直接翻到下一题`);
           const advanced = await this.advanceExerciseQuestion(questionRoot, fingerprint);
           previousFingerprint = fingerprint;
           if (!advanced) break;
