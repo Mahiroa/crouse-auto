@@ -4,3 +4,19 @@ dist/
 docs/
 tools/
 verify/
+
+# 抓包/密钥类文件：本地调试会有，但绝不能进仓库
+*.devtools
+*.har
+*.harlog
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+cookie*.txt
+cookies*.txt
+*.log
+*.bak
+*.tmp
