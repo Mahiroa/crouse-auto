@@ -70,7 +70,8 @@ src/
 | `core/config.js` | 运行期配置（Config） | 整语句 | 版本、倍速、ppt 翻页间隔、全部存储键；`playbackRate` 取自 `Y.DEFAULT_PLAYBACK` | `Config` |
 | `utils/timing.js` | 计时、轮询与后台节流 | 对象分片 | `sleep`/`humanPause`/`randInt`/`isFastMode`/`isTabReallyHidden`/`poll` | `UtilsTiming` |
 | `utils/text.js` | 文本解析与完成度文案判定 | 整语句 + 对象分片 | `pctText`；`safeJSONParse`/`isProgressDone`/`isMarkedDone` | `pctText`、`UtilsText` |
-| `utils/human-check.js` | 安全核验检测与闸门 | 对象分片 | `isHumanCheckVisible`/`gateHumanCheck`/`waitIfHumanCheck`/`humanClick` | `UtilsHumanCheck` |
+| `utils/human-check.js` | 安全核验检测与闸门（skip / wait / auto 三态） | 对象分片 | `isHumanCheckVisible`（文本扫描 + `RiskChallenge.isPresent()` 并集）/`gateHumanCheck`/`waitIfHumanCheck`/`humanClick` | `UtilsHumanCheck` |
+| `utils/risk-challenge.js` | 安全核验求解：轨迹型 canvas 题（shadow DOM 里的 `#homework-automation-risk-challenge > canvas`） | 整语句 + 对象分片 | Tier A 钩 `CanvasRenderingContext2D`（arc/ellipse/fillText/clearRect + `getTransform`）拿圆心与数字；Tier B `getImageData` HSV 分割 + 12×16 模板匹配；1..N 排列校验；贝塞尔轨迹派发（派发到 canvas、`composed:true`）；`installHooks` 幂等、模块求值时自装 | `RiskChallenge`（`create/findCanvas/isPresent/isVisible/installHooks`） |
 | `utils/dom.js` | 页面信息、挂载点与媒体时长 | 对象分片 | `inIframe`/课堂 ID/回跳地址/挂载点等待/`getDDL`/`dismissPopups` | `UtilsDom` |
 | `utils/index.js` | 工具集装配（Utils） | 装配（spread） | 四片合成 `Y.Utils` | `Utils` |
 | `storage/store.js` | localStorage 封装、配置读写与启动同步 | 整语句 | `storeSafe`（异常兜底）+ `Store`（进度、AI、倍速、功能开关、跨页恢复、轨迹、面板位置）；加载期回写 `Y.Config.playbackRate` | `storeSafe`、`Store` |

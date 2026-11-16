@@ -48,37 +48,79 @@
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
           this.panel.log(`2s 后开始播放：${className}`);
           await Y.Utils.sleep(2000);
-          let statusTimer;
-          let videoTimer;
+          let statusTimer = null;
+          let videoTimer = null;
+          let statusStopped = false;
+          let videoStopped = false;
           let stopObserve = () => { };
-          try {
-            statusTimer = setInterval(() => {
-              const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
-              if (Y.Utils.isMarkedDone(status)) {
-                this.panel.log(`${className} 播放完毕`);
-                clearInterval(statusTimer);
-                statusTimer = null;
+          // 固定节拍（setInterval 200 / 5000）是自动化探针 automation-risk-probe 最稳的机器特征，
+          // 改成「自调度 + 抖动」：每轮跑完再用 Y.Utils.randInt 随机排下一轮。停链靠 stopped 标记
+          // 加 clearTimeout：回调醒来第一件事就是看标记，所以 finally 清理后不会再长出第二条链。
+          const stopStatusLoop = () => {
+            statusStopped = true;
+            if (statusTimer) {
+              clearTimeout(statusTimer);
+              statusTimer = null;
+            }
+          };
+          const stopVideoLoop = () => {
+            videoStopped = true;
+            if (videoTimer) {
+              clearTimeout(videoTimer);
+              videoTimer = null;
+            }
+          };
+          const loopStatus = () => {
+            if (statusStopped) return;
+            statusTimer = setTimeout(() => {
+              statusTimer = null;
+              if (statusStopped) return;
+              try {
+                const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
+                if (Y.Utils.isMarkedDone(status)) {
+                  this.panel.log(`${className} 播放完毕`);
+                  // 判到完毕即自停，等价于原来的 clearInterval(statusTimer)
+                  statusStopped = true;
+                }
+              } finally {
+                // 抛错也不许断链：原来的 setInterval 就是「这一轮出错，下一轮照跑」
+                if (!statusStopped) loopStatus();
               }
-            }, 200);
+            }, Y.Utils.randInt(180, 320));
+          };
+          try {
+            loopStatus();
 
             const videoWaitStart = Date.now();
-            videoTimer = setInterval(() => {
-              const video = document.querySelector('video');
-              if (video) {
-                // 直接同步注册观察器：observePause 内部已有 1s 轮询，不需要外部再延时 2s。
-                // 关键是不能在 setTimeout 回调里延迟赋值 stopObserve —— video 在 5s 轮询末段才出现时，
-                // finished 的 poll 可能先返回，finally 调用到的仍是初始空函数，
-                // 2 秒后照样会挂上 1s + 20s 定时器和 3 个监听器（每集泄漏一套）。
-                Y.Player.applySpeed();
-                Y.Player.mute();
-                // 保存清理函数：每集都挂一套 1s 定时器/监听器会越积越多
-                stopObserve = Y.Player.observePause(video);
-                clearInterval(videoTimer);
+            const loopVideo = () => {
+              if (videoStopped) return;
+              videoTimer = setTimeout(() => {
                 videoTimer = null;
-              } else if (Date.now() - videoWaitStart > 20000) {
-                location.reload();
-              }
-            }, 5000);
+                if (videoStopped) return;
+                try {
+                  const video = document.querySelector('video');
+                  if (video) {
+                    // 直接同步注册观察器：observePause 内部自带 0.8~1.4 秒的抖动轮询，不需要外部再延时 2s。
+                    // 关键是不能在 setTimeout 回调里延迟赋值 stopObserve —— video 在轮询末段才出现时，
+                    // finished 的 poll 可能先返回，finally 调用到的仍是初始空函数，
+                    // 之后照样会挂上一整套轮询和监听器（每集泄漏一套）。
+                    Y.Player.applySpeed();
+                    Y.Player.mute();
+                    // 保存清理函数：每集都挂一套轮询/监听器会越积越多
+                    stopObserve = Y.Player.observePause(video);
+                    // 等到播放器即自停，等价于原来的 clearInterval(videoTimer)
+                    videoStopped = true;
+                  } else if (Date.now() - videoWaitStart > 20000) {
+                    // 20 秒上限仍是墙钟硬判定，与抖动无关：单轮最长 6 秒，所以最迟第 4~6 轮
+                    // （约 20.0~26.0 秒）必然 reload，不会因为抖动把「多久收尾」变成不确定
+                    location.reload();
+                  }
+                } finally {
+                  if (!videoStopped) loopVideo();
+                }
+              }, Y.Utils.randInt(4000, 6000));
+            };
+            loopVideo();
 
             await Y.Utils.sleep(8000);
             finished = await Y.Utils.poll(() => {
@@ -86,8 +128,9 @@
               return Y.Utils.isMarkedDone(status);
             }, { interval: 1000, timeout: await Y.Utils.getDDL() });
           } finally {
-            if (statusTimer) clearInterval(statusTimer);
-            if (videoTimer) clearInterval(videoTimer);
+            // 两条自调度链一起停：先置标志再清 id，已在队列里的那一轮醒来不会重排
+            stopStatusLoop();
+            stopVideoLoop();
             // 观察器现在是同步注册的，finally 一定能拿到真实清理函数（不再有空函数竞态）
             stopObserve();
           }

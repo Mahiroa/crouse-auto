@@ -359,7 +359,9 @@
       const saved = Y.Store.getFeatureConf();
       ui.featureAutoAI.checked = saved.autoAI;
       ui.featureAutoComment.checked = saved.autoComment;
-      const humanMode = saved.humanCheckMode === 'wait' ? 'wait' : 'skip';
+      // 三态回填：skip / wait / auto，脏值一律落到 skip（与 Store.getFeatureConf 的归一化一致）
+      const savedHumanMode = saved.humanCheckMode;
+      const humanMode = savedHumanMode === 'wait' || savedHumanMode === 'auto' ? savedHumanMode : 'skip';
       const humanPicked = doc.querySelector(`input[name="human_check_mode"][value="${humanMode}"]`);
       if (humanPicked) humanPicked.checked = true;
       renderQuickChips();
@@ -477,10 +479,12 @@
     ui.saveSettings.onclick = () => {
       const conf = readFormAIConf();
       Y.Store.setAIConf(conf);
+      // 三态取值：只认 auto / wait，其它（含未勾选）一律存 skip
+      const pickedHumanMode = doc.querySelector('input[name="human_check_mode"]:checked')?.value;
       const featureConf = {
         autoAI: ui.featureAutoAI.checked,
         autoComment: ui.featureAutoComment.checked,
-        humanCheckMode: doc.querySelector('input[name="human_check_mode"]:checked')?.value === 'wait' ? 'wait' : 'skip',
+        humanCheckMode: pickedHumanMode === 'wait' || pickedHumanMode === 'auto' ? pickedHumanMode : 'skip',
         fastMode: ui.featureFastMode.checked
       };
       Y.Store.setFeatureConf(featureConf);
@@ -497,7 +501,12 @@
       }
       renderQuickChips();
       closeSettings();
-      const humanText = featureConf.humanCheckMode === 'wait' ? '人机验证改为停住等待' : '人机验证改为跳过当前章节';
+      // 三态提示文案：与 markup 里的选项一一对应
+      const humanTextMap = {
+        wait: '人机验证改为停住等待',
+        auto: '人机验证改为自动过核验（实验，未通过会转人工等待）'
+      };
+      const humanText = humanTextMap[featureConf.humanCheckMode] || '人机验证改为跳过当前章节';
       const speedText = featureConf.fastMode ? '，已开启快速模式' : '';
       log(`✅ 设置已保存，${humanText}${speedText}${playbackText}`);
     };

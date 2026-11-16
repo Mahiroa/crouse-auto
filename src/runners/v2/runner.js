@@ -122,7 +122,8 @@
           continue;
         }
         missingListRetries = 0;
-        console.log(`当前集数:${this.outside}/全部集数${list.length}`);
+        // 日志归口：进度播报走 Stealth，quiet 时只进面板，不再写页面控制台
+        Y.Stealth?.note?.(`当前集数:${this.outside}/全部集数${list.length}`);
         if (this.outside >= list.length) {
           this.panel.log('课程刷完啦 🎉');
           this.panel.track({ id: 'course-done', kind: 'course', title: '本课目录已全部结束', status: 'done', detail: '没有更多内容' });

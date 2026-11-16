@@ -847,6 +847,10 @@
                   <input type="radio" name="human_check_mode" value="wait">
                   <span><b>停下等待</b><small>手动完成验证后自动继续</small></span>
                 </label>
+                <label class="choice">
+                  <input type="radio" name="human_check_mode" value="auto">
+                  <span><b>自动过核验（实验）</b><small>脚本自己解轨迹核验；没解过会自动转人工等待</small></span>
+                </label>
               </div>
             </section>
 

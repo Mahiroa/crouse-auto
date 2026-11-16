@@ -2,82 +2,54 @@
   // 检索、模型调用与选项提交
 
   const SolverAI = {
-    requestChat(prompt, systemPrompt, confOverride = null, maxTokens = 1024, images = null) {
-      const saved = this.normalizeConf(confOverride || Y.Store.getAIConf());
-      const API_URL = saved.url;
-      const API_KEY = saved.key;
-      const MODEL_NAME = saved.model;
-      const API_FORMAT = saved.apiFormat || 'openai';
-      const AUTH_METHOD = saved.authMethod || 'bearer';
+    // 答案请求的默认输出预算。真机日志里填空题用 1024 跑出了 finish_reason=length，
+    // 同一道题连试 3 次都撞同一面墙，题目就卡在那里不动（v3.6.5 实测）。
+    // 答案本身很短，给 2048 足够；不够还会自动升档，见 chatBudgets。
+    ANSWER_MAX_TOKENS: 2048,
+    // 被截断时按预算升档重试（1024 → 2048 → 4096），最多 3 档。
+    // 已经是长文生成的预算（讨论回复 32768）就原样用，不放大费用。
+    chatBudgets(maxTokens) {
+      const base = Math.max(64, Number(maxTokens) || 1024);
+      if (base > 4096) return [base];
+      const budgets = [base];
+      let next = base;
+      while (next < 4096 && budgets.length < 3) {
+        next = Math.min(next * 2, 4096);
+        budgets.push(next);
+      }
+      return [...new Set(budgets)];
+    },
+    // 升档重试时追加到用户消息末尾的约束：模型上一轮就是写太多才被截断的
+    answerRetryHint: '\n（上一次回复太长被截断了。这次只输出一行，格式必须是「答案：xxx」，不要任何推导、复述或解释。）',
+    appendHint(userContent, hint) {
+      if (!hint) return userContent;
+      if (Array.isArray(userContent)) {
+        return userContent.map(block => (block?.type === 'text' ? { ...block, text: `${block.text}${hint}` } : block));
+      }
+      return `${userContent}${hint}`;
+    },
+    // 截断的正文里如果已经有结构完整的答案行，就捞出来用，别把整题判成失败。
+    // 只认「字母串 / 对错 / 不超过 30 字的填空答案」，半截解释、半句话一律不收。
+    salvageTruncated(text) {
+      const hit = String(text || '').match(/(?:正确)?答案\s*[：:]\s*([^\n]{1,80})/);
+      if (!hit) return '';
+      const value = hit[1].trim()
+        .replace(/^["'“”‘’【\[（(]+/, '')
+        .replace(/["'“”‘’】\]）)]+$/, '')
+        .trim();
+      if (!value) return '';
+      if (/^[A-F]{1,6}$/i.test(value)) return `答案：${value.toUpperCase()}`;
+      if (/^(正确|错误|对|错)$/.test(value)) return `答案：${value}`;
+      if (value.length > 30 || /[。；;：:]$/.test(value)) return '';
+      return `答案：${value}`;
+    },
+    // 单次请求：只负责发一次 HTTP，把正文 / 推理内容 / 是否被截断原样交回 requestChat。
+    // 拆出来是为了「截断就升预算再来一次」不必把这段 HTTP 逻辑复制两遍。
+    postChat(url, headers, body, apiFormat = 'openai') {
       return new Promise((resolve, reject) => {
-        if (!API_URL) {
-          reject('请填写 API URL');
-          return;
-        }
-        if (!API_KEY || API_KEY.includes('sk-xxxx')) {
-          const msg = '⚠️ 请在 [AI配置] 中填写有效的 API Key';
-          Y.panel.log(msg);
-          reject(msg);
-          return;
-        }
-        const authHeader = AUTH_METHOD === 'x-api-key'
-          ? { 'x-api-key': API_KEY }
-          : { 'Authorization': `Bearer ${API_KEY}` };
-        const headers = { 'Content-Type': 'application/json', ...authHeader };
-        const imageList = Array.isArray(images) ? images.filter(Boolean) : [];
-        // 截图识题也走 DeepSeek：OpenAI 格式用 image_url，Anthropic 格式用 base64 image block
-        const parseDataUrl = value => {
-          const match = String(value || '').match(/^data:([^;,]+);base64,(.+)$/);
-          return match ? { mediaType: match[1], data: match[2] } : null;
-        };
-        const userContent = !imageList.length
-          ? prompt
-          : API_FORMAT === 'anthropic'
-            ? [
-              ...imageList.map(parseDataUrl).filter(Boolean).map(image => ({
-                type: 'image',
-                source: { type: 'base64', media_type: image.mediaType, data: image.data }
-              })),
-              { type: 'text', text: prompt }
-            ]
-            : [
-              { type: 'text', text: prompt },
-              ...imageList.map(url => ({ type: 'image_url', image_url: { url, detail: 'high' } }))
-            ];
-        let apiHostname = '';
-        try {
-          apiHostname = new URL(API_URL).hostname.toLowerCase();
-        } catch (_) {}
-        const isDeepSeek = apiHostname === 'api.deepseek.com';
-        const isAnthropic = apiHostname === 'api.anthropic.com';
-        let body;
-        if (API_FORMAT === 'anthropic') {
-          if (isAnthropic) headers['anthropic-version'] = '2023-06-01';
-          body = {
-            model: MODEL_NAME,
-            max_tokens: maxTokens,
-            system: systemPrompt,
-            messages: [{ role: 'user', content: userContent }]
-          };
-          // 两套 Anthropic 兼容协议的关闭思考参数不同，不能互相套用。
-          // 第三方兼容服务不擅自加参数，由下方“只采用正式正文”的逻辑兜底。
-          if (isDeepSeek) body.reasoning = { effort: 'none' };
-          else if (isAnthropic) body.thinking = { type: 'disabled' };
-        } else {
-          body = {
-            model: MODEL_NAME,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userContent }
-            ],
-            temperature: 0.1,
-            max_tokens: maxTokens
-          };
-          if (isDeepSeek) body.thinking = { type: 'disabled' };
-        }
         GM_xmlhttpRequest({
           method: 'POST',
-          url: API_URL,
+          url,
           headers,
           data: JSON.stringify(body),
           timeout: 120000,
@@ -85,7 +57,7 @@
             if (res.status !== 200) {
               const bodyText = String(res.responseText || (typeof res.response === 'string' ? res.response : '') || '').trim();
               const err = (res.status === 404 && !bodyText)
-                ? `请求被篡改猴拦截。请确认脚本头部允许访问该域名，并在篡改猴里放行。当前地址：${API_URL}`
+                ? `请求被篡改猴拦截。请确认脚本头部允许访问该域名，并在篡改猴里放行。当前地址：${url}`
                 : `请求失败: HTTP ${res.status} - ${bodyText.slice(0, 180)}`;
               Y.panel.log(err);
               reject(err);
@@ -110,22 +82,18 @@
                   .map(block => block.text)
                   .join('\n');
               // reasoning_content / thinking 只能用于诊断，永远不能回退成可提交答案。
-              const reasoningText = String(message?.reasoning_content || '').trim();
-              const answerText = String(API_FORMAT === 'anthropic' ? anthropicText : openAIText).trim();
-              if (choice?.finish_reason === 'length' || json.stop_reason === 'max_tokens') {
-                const truncated = answerText ? `，已丢弃截断正文：${answerText.slice(0, 160)}` : '';
-                reject(`模型输出达到 token 上限，回复不完整，已停止处理${truncated}`);
-                return;
-              }
-              if (!answerText) {
-                if (reasoningText || anthropicReasoning) {
-                  reject(`接口只返回了推理内容，未返回正式答案，已停止处理。推理摘录：${reasoningText.slice(0, 160) || '（接口未提供可显示文本）'}`);
-                } else {
-                  reject('接口已连通，但没有返回正式答案文本');
-                }
-                return;
-              }
-              resolve(answerText);
+              const thinkingText = anthropicBlocks
+                .filter(block => block?.type === 'thinking' && typeof block.thinking === 'string')
+                .map(block => block.thinking)
+                .join('\n');
+              const reasoningText = String(message?.reasoning_content || thinkingText || '').trim();
+              resolve({
+                text: String(apiFormat === 'anthropic' ? anthropicText : openAIText).trim(),
+                reasoningText,
+                reasoningOnly: anthropicReasoning,
+                finishReason: choice?.finish_reason || json.stop_reason || '',
+                truncated: choice?.finish_reason === 'length' || json.stop_reason === 'max_tokens'
+              });
             } catch (_) {
               reject('JSON 解析失败');
             }
@@ -134,6 +102,101 @@
           ontimeout: () => reject('请求超时')
         });
       });
+    },
+    async requestChat(prompt, systemPrompt, confOverride = null, maxTokens = 1024, images = null) {
+      const saved = this.normalizeConf(confOverride || Y.Store.getAIConf());
+      const API_URL = saved.url;
+      const API_KEY = saved.key;
+      const API_FORMAT = saved.apiFormat || 'openai';
+      const AUTH_METHOD = saved.authMethod || 'bearer';
+      if (!API_URL) {
+        throw '请填写 API URL';
+      }
+      if (!API_KEY || API_KEY.includes('sk-xxxx')) {
+        const msg = '⚠️ 请在 [AI配置] 中填写有效的 API Key';
+        Y.panel.log(msg);
+        throw msg;
+      }
+      const authHeader = AUTH_METHOD === 'x-api-key'
+        ? { 'x-api-key': API_KEY }
+        : { 'Authorization': `Bearer ${API_KEY}` };
+      const headers = { 'Content-Type': 'application/json', ...authHeader };
+      const imageList = Array.isArray(images) ? images.filter(Boolean) : [];
+      // 截图识题也走 DeepSeek：OpenAI 格式用 image_url，Anthropic 格式用 base64 image block
+      const parseDataUrl = value => {
+        const match = String(value || '').match(/^data:([^;,]+);base64,(.+)$/);
+        return match ? { mediaType: match[1], data: match[2] } : null;
+      };
+      const userContent = !imageList.length
+        ? prompt
+        : API_FORMAT === 'anthropic'
+          ? [
+            ...imageList.map(parseDataUrl).filter(Boolean).map(image => ({
+              type: 'image',
+              source: { type: 'base64', media_type: image.mediaType, data: image.data }
+            })),
+            { type: 'text', text: prompt }
+          ]
+          : [
+            { type: 'text', text: prompt },
+            ...imageList.map(url => ({ type: 'image_url', image_url: { url, detail: 'high' } }))
+          ];
+      let apiHostname = '';
+      try {
+        apiHostname = new URL(API_URL).hostname.toLowerCase();
+      } catch (_) {}
+      const isDeepSeek = apiHostname === 'api.deepseek.com';
+      const isAnthropic = apiHostname === 'api.anthropic.com';
+      const budgets = this.chatBudgets(maxTokens);
+      const tried = [];
+      let salvaged = '';
+      let lastReason = '';
+      for (let i = 0; i < budgets.length; i++) {
+        const budget = budgets[i];
+        const content = this.appendHint(userContent, i ? this.answerRetryHint : '');
+        const body = API_FORMAT === 'anthropic'
+          ? {
+            model: saved.model,
+            max_tokens: budget,
+            system: systemPrompt,
+            messages: [{ role: 'user', content }]
+          }
+          : {
+            model: saved.model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content }
+            ],
+            temperature: 0.1,
+            max_tokens: budget
+          };
+        // 两套 Anthropic 兼容协议的关闭思考参数不同，不能互相套用。
+        // 第三方兼容服务不擅自加参数，由下方「只采用正式正文」的逻辑兜底。
+        if (API_FORMAT === 'anthropic') {
+          if (isDeepSeek) body.reasoning = { effort: 'none' };
+          else if (isAnthropic) body.thinking = { type: 'disabled' };
+        } else if (isDeepSeek) {
+          body.thinking = { type: 'disabled' };
+        }
+        if (i > 0) Y.panel.log(`模型上一轮输出被截断，改用 max_tokens=${budget} 重试`);
+        const reply = await this.postChat(API_URL, headers, body, API_FORMAT);
+        tried.push(budget);
+        if (reply.text && !reply.truncated) return reply.text;
+        if (!reply.truncated) {
+          if (!reply.reasoningText) throw '接口已连通，但没有返回正式答案文本';
+          lastReason = `接口只返回了推理内容，未返回正式答案，已停止处理。推理摘录：${reply.reasoningText.slice(0, 160) || '（接口未提供可显示文本）'}`;
+          continue;
+        }
+        // 被截断：先记住已能捞到的答案，还没到最后一档就继续升预算重试
+        const sal = this.salvageTruncated(reply.text);
+        if (sal) salvaged = sal;
+        lastReason = `模型输出达到 token 上限（model=${saved.model || '未设置'}，已试 max_tokens=${tried.join('/')}，finish_reason=${reply.finishReason || 'length'}）`;
+      }
+      if (salvaged) {
+        Y.panel.log(`⚠️ 模型输出被截断，从已返回正文里取到答案：${salvaged.replace(/^答案：/, '')}`);
+        return salvaged;
+      }
+      throw lastReason || '模型没有返回可用答案';
     },
     ping(conf) {
       return this.requestChat('只回复两个字：成功', '你是连接测试助手，只按用户要求回复。', conf, 64);
@@ -280,11 +343,19 @@
     fillInputs(itemBodyElement) {
       if (!itemBodyElement) return [];
       const scope = itemBodyElement.closest?.('.container-problem') || itemBodyElement;
-      const marked = [...scope.querySelectorAll('input.blank-item-dynamic, input[placeholder*="输入答案"], input[placeholder*="填空"]')];
-      const loose = [...scope.querySelectorAll('input[type="text"], input:not([type])')]
-        .filter(el => !/search|搜索|昵称|手机号|密码/.test(String(el.getAttribute('placeholder') || '')));
+      const markedSel = 'input.blank-item-dynamic, input[placeholder*="输入答案"], input[placeholder*="填空"]';
+      const looseSel = 'input[type="text"], input:not([type])';
       const usable = el => Boolean(el) && !el.disabled && !el.readOnly;
-      const candidates = (marked.length ? marked : loose).filter(usable);
+      const looksNoise = el => /search|搜索|昵称|手机号|密码/.test(String(el.getAttribute('placeholder') || ''));
+      // 先在题干容器内部找：有的卷面会把整份题都渲染出来，一路 widening 到 .container-problem
+      // 会把别的题的填空框一起收集，答案就填到别的题上去了。
+      const collect = root => {
+        const marked = [...root.querySelectorAll(markedSel)];
+        const loose = [...root.querySelectorAll(looseSel)].filter(el => !looksNoise(el));
+        return (marked.length ? marked : loose).filter(usable);
+      };
+      let candidates = collect(itemBodyElement);
+      if (!candidates.length && scope !== itemBodyElement) candidates = collect(scope);
       if (!candidates.length) return [];
       let visible = [];
       try {
@@ -359,10 +430,24 @@
           Y.panel.log(`⚠️ 第 ${i + 1} 个空填值失败：${err?.message || err}`);
           return false;
         }
-        Y.panel.log(`第 ${i + 1} 个空 ← ${value}`);
+        // 有的填空框绑了逐字校验，一次性塞值会被组件回滚成空串：
+        // 读回一次，值没进去就改成逐字输入，别让「已经填过」变成空提交。
+        let current = String(inputs[i].value ?? '');
+        if (current !== value) {
+          await this.typeIntoInput(inputs[i], value);
+          current = String(inputs[i].value ?? '');
+          if (current !== value) Y.panel.log(`⚠️ 第 ${i + 1} 个空的输入值没写进去（页面读回「${current}」）`);
+        }
+        Y.panel.log(`第 ${i + 1} 个空 ← ${current || value}`);
         await Y.Utils.humanPause(200, 600);
       }
       Y.panel.noteAnswer(answers.join(' / ').slice(0, 40));
+      // 「提交」在没填完时是禁用态，禁用的按钮点下去等于没点：先等它变成可点。
+      const clickable = btn => Boolean(btn) && btn.disabled !== true
+        && btn.getAttribute('aria-disabled') !== 'true'
+        && !btn.classList.contains('is-disabled');
+      const ready = await Y.Utils.poll(() => clickable(this.findSubmitButton(scope)), { interval: 200, timeout: 3000 });
+      if (!ready) Y.panel.log('提示：提交按钮仍是禁用态，仍然尝试点击一次');
       const submitBtn = this.findSubmitButton(scope);
       if (!submitBtn) {
         Y.panel.log('⚠️ 未找到提交按钮，本题按未提交处理');
@@ -375,7 +460,34 @@
         Y.panel.log('⚠️ 提交按钮的点击被安全核验拦截，本题未提交');
         return false;
       }
+      // 点完「提交」平台会先弹确认框（「刚刚答完的习题还没有提交」「n 道已作答习题未提交」），
+      // 弹窗带遮罩，不点掉的话按钮一直是禁用态、答案一直没交上去
+      await Y.Utils.handleSubmitDialog?.();
+      // 点完立刻看一次页面变化（按钮变灰 / 出现结果 / 题目被换掉），
+      // 免得把「点了但平台没接收」的填空题当成已提交。
+      const accepted = await Y.Utils.poll(() => {
+        const latestRoot = this.liveQuestionRoot(itemBodyElement);
+        const latestBtn = this.findSubmitButton(latestRoot);
+        return !latestBtn || !clickable(latestBtn) || Boolean(this.revealedResult(latestRoot));
+      }, { interval: 300, timeout: 2500 });
+      if (!accepted) Y.panel.log('提示：提交后页面没有给出任何变化，若平台未记分可稍后重试本题');
       return true;
+    },
+    // 逐字输入：每个字符单独派发 input 事件，模拟真人打字。
+    // 只在 setFieldValue 之后读回值不对时才用，正常输入框不会走到这里。
+    async typeIntoInput(el, text) {
+      if (!el) return;
+      el.focus();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      let typed = '';
+      for (const char of String(text)) {
+        typed += char;
+        if (setter) setter.call(el, typed);
+        else el.value = typed;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: char, inputType: 'insertText' }));
+        await Y.Utils.sleep(30);
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
     },
     detectQuestionType(itemBodyElement) {
       const choices = this.questionChoices(itemBodyElement);
@@ -506,7 +618,7 @@
 ${restated}
 ${evidence ? `搜索结果：\n${evidence}` : ''}
 `;
-        return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf);
+        return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf, this.ANSWER_MAX_TOKENS);
       }
       Y.panel.showQuestion(questionText);
       await this.waitBeforeSearch('还原后的题目已写在上方卡片');
@@ -521,7 +633,7 @@ ${evidence ? `搜索结果：\n${evidence}` : ''}
 ${evidence ? `搜索结果：\n${evidence}\n` : ''}题目内容：
 ${questionText}
 `;
-      return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf);
+      return this.requestChat(prompt, this.answerSystemPrompt(questionType), answerConf, this.ANSWER_MAX_TOKENS);
     },
     // 从模型正文里提取答案 token（字母串 / 对 / 错）。autoSelectAndSubmit 与答案缓存共用它：
     // 两处各写一份正则时一旦分叉，就会出现「缓存里存的 A、实际点的是 AB」这种脏缓存。
@@ -626,6 +738,8 @@ ${questionText}
         Y.panel.log('⚠️ 提交按钮的点击被安全核验拦截，本题未提交');
         return false;
       }
+      // 提交后的平台确认弹窗必须点掉，否则答案根本没交上去（详见 human-check.js 的 submitDialogRules）
+      await Y.Utils.handleSubmitDialog?.();
       return true;
     }
   };

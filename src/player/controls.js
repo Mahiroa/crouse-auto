@@ -68,6 +68,7 @@
       const rect = control.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
       const x = rect.left + rect.width / 2;
       const y = rect.top + rect.height / 2;
+      // 这里的合成 hover 是唯一通道（CSS :hover 无法用原生 .click() 触发），不是失败兜底，保留原行为
       for (const type of ['mouseover', 'mouseenter', 'mousemove']) {
         try {
           control.dispatchEvent(new view.MouseEvent(type, {
@@ -108,6 +109,7 @@
       const rect = option.getBoundingClientRect?.() || { left: 10, top: 10, width: 0, height: 0 };
       const x = rect.left + rect.width / 2 || 10;
       const y = rect.top + rect.height / 2 || 10;
+      // 合成 mouseover→mousemove 是站点要求的前置（见上条注释），必须排在原生 click 之前，不能改成「先 click 失败再合成」
       for (const [type, px] of [['mouseover', x - 1], ['mousemove', x], ['mousedown', x], ['mouseup', x]]) {
         try {
           option.dispatchEvent(new view.MouseEvent(type, {
@@ -275,7 +277,7 @@
         Object.defineProperty(media, 'muted', { configurable: true, get: () => true, set: () => { } });
         Object.defineProperty(media, 'volume', { configurable: true, get: () => 0, set: () => { } });
         this.muteLocks.add(media);
-        console.info('[刷课助手] 播放器反复恢复音量，已锁定媒体静音');
+        Y.Stealth?.note?.('播放器反复恢复音量，已锁定媒体静音');
       } catch (_) {}
     },
     unlockMute(media) {

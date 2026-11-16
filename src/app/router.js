@@ -9,7 +9,9 @@
     Y.Store.setPendingAutoStart(classroomId, returnUrl);
     // 刷课流程里任何一步抛异常都要留痕，不能让面板静默停在半路
     const reportCrash = err => {
-      console.error('[刷课助手] 刷课流程异常：', err);
+      // 统一走 Y.Stealth 出口：quietLog 开启后只进面板，不在 console 里自报自动化身份
+      // （Y.Stealth 可能不存在：切片测试 / 旧产物，故可选调用；不存在时退回面板留痕）
+      Y.Stealth?.warn?.('刷课流程异常', err);
       // 顺序很重要：resetStartButton 会把徽标设回「待机」，以前先 error 再 reset 会让
       // 「异常」徽标只闪一下，异步崩溃时用户在面板上看不到异常态。先复位按钮，最后写 error。
       Y.panel.resetStartButton('开始刷课');

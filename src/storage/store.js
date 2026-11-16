@@ -130,7 +130,11 @@
       const conf = {
         autoAI: saved.autoAI ?? false,
         autoComment: saved.autoComment ?? false,
-        humanCheckMode: saved.humanCheckMode === 'wait' ? 'wait' : 'skip',
+        // 三态：'skip' 跳过当前章节（默认）/ 'wait' 停下等人 / 'auto' 脚本自动过核验；
+        // 其它任何脏值（旧版本、手改 localStorage、null）一律归一成默认的 'skip'。
+        humanCheckMode: saved.humanCheckMode === 'wait' || saved.humanCheckMode === 'auto'
+          ? saved.humanCheckMode
+          : 'skip',
         fastMode: saved.fastMode === true,
       };
       localStorage.setItem(Y.Config.storageKeys.feature, JSON.stringify(conf));

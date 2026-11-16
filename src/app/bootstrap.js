@@ -15,6 +15,19 @@
     const mountPanel = () => {
       Y.panel = Y.createPanel();
       Y.panel.log(`雨课堂刷课助手 v${Y.Config.version} 已加载`);
+      // 环境体检：把「页面有没有被风控看出来的自动化痕迹」直接报在面板上，
+      // 省得再靠页面抛 automation-risk-probe 才知道。Y.Stealth 可能不存在（切片测试），必须可选调用。
+      try {
+        const risk = Y.Stealth?.report?.();
+        if (risk) {
+          Y.panel.log(
+            '环境体检 score=' + risk.score + '（' + risk.riskLevel + '）'
+            + (risk.patchedNatives.length
+              ? ' · 被改写：' + risk.patchedNatives.join('/')
+              : ' · 原生 API 完整')
+          );
+        }
+      } catch (_) {}
       Y.panel.setStartHandler(Y.start);
       Y.installPanelVisibility(
         () => Y.panel?.frame,
@@ -35,13 +48,13 @@
     try {
       mountPanel();
     } catch (err) {
-      console.error('面板初始化失败:', err);
+      Y.Stealth?.warn?.('面板初始化失败', err);
       // 文档没就绪 / 挂载点没出来时等 DOM 就绪再试一次；仍失败就留一条页面级提示
       const retry = () => {
         try {
           mountPanel();
         } catch (err2) {
-          console.error('面板初始化重试失败:', err2);
+          Y.Stealth?.warn?.('面板初始化重试失败', err2);
           Y.showPanelFailureNotice(err2);
         }
       };

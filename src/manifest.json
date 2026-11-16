@@ -1,6 +1,6 @@
 {
   "name": "雨课堂刷课助手",
-  "version": "3.6.4",
+  "version": "3.6.7",
   "header": "userscript.header.txt",
   "entry": "Y.boot();",
   "source": "雨课堂刷课助手-3.1.32.js",
@@ -28,6 +28,13 @@
     {
       "file": "utils/human-check.js",
       "title": "安全核验检测与闸门"
+    },
+    {
+      "file": "utils/risk-challenge.js",
+      "title": "安全核验求解（轨迹型 canvas）",
+      "loadAfter": [
+        "utils/human-check.js"
+      ]
     },
     {
       "file": "utils/dom.js",
@@ -102,8 +109,19 @@
       "title": "面板全屏可见性兜底"
     },
     {
+      "file": "platform/stealth.js",
+      "title": "环境体检与日志出口（Stealth）",
+      "loadAfter": [
+        "core/config.js",
+        "utils/index.js"
+      ]
+    },
+    {
       "file": "platform/screen-check.js",
-      "title": "原生事件注册与切屏拦截兼容层"
+      "title": "原生事件注册与切屏拦截兼容层",
+      "loadAfter": [
+        "platform/stealth.js"
+      ]
     },
     {
       "file": "panel/markup.js",

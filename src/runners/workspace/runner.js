@@ -593,12 +593,53 @@
       this.panel.log(`已进入：${Y.AiWorkspace.getActiveLeafTitle() || title}${cost}`);
     }
 
+    // 原生点击探针：能点到（click 事件真的派发到元素上）返回 true，交给 openLeaf 原来的
+    // waitLeafSwitch 判定链；元素不可用/事件没送达返回 false，由 clickLeaf 回落到合成事件。
+    // 只做同步判定，不引入额外等待，也不改 openLeaf 的重试次数与日志语义。
+    // 判据来自 Chrome 157 实测（脚本与结论见 _tmp/w2-clickleaf-facts.js 那一轮报告）：
+    // disabled 元素上 .click() 会被浏览器静默丢弃、监听器一次都收不到，而 dispatchEvent 仍然送达 ——
+    // 这正好是「点了没反应 → 用合成链路兜底」的客观判据，不是凭感觉回退。
+    nativeClickLeaf(target) {
+      if (!target || typeof target.click !== 'function') return false;
+      // 已脱离文档的节点、disabled 控件：浏览器会静默丢掉这次 click，直接让位给合成链路。
+      // aria-disabled=true 不是浏览器级禁用（.click() 照样派发），但组件库通常据此忽略点击，
+      // 属于业务层「点了没反应」，同样交给兜底链路去送达事件。
+      if (!target.isConnected) return false;
+      if (target.disabled === true) return false;
+      if (String(target.getAttribute?.('aria-disabled') || '') === 'true') return false;
+      const doc = target.ownerDocument || document;
+      let delivered = false;
+      const probe = () => { delivered = true; };
+      try {
+        doc.addEventListener('click', probe, true);
+      } catch (_) {}
+      try {
+        target.click();
+      } catch (_) {
+        return false;
+      } finally {
+        try { doc.removeEventListener('click', probe, true); } catch (_) {}
+      }
+      return delivered;
+    }
+
     async clickLeaf(target, hard = false) {
       // 返回 boolean：openLeaf 必须能区分“点到了”和“没点到/被安全核验拦下”，
       // 否则核验时会在目录页上继续 poll 并误判切换。
       if (!target) return false;
       try { target.scrollIntoView({ block: 'nearest' }); } catch (_) {}
       if (hard) {
+        // 这里是「点击学习单元」的重试路径。合成 MouseEvent 的 isTrusted 恒为 false，
+        // 站点的自动化风控探针（automation-risk-probe）又确实拿 isTrusted 当判据；
+        // 但 Chrome 157 实测：element.click() 和 dispatchEvent(new MouseEvent('click')) 派发的
+        // click 事件 isTrusted 都是 false，只有真实输入（CDP Input 域 / 扩展 debugger）才是 true ——
+        // 页面脚本无法靠换一个 click API 把 isTrusted 变真，所以这段不宣称能降 isTrusted 特征。
+        // 仍然先走原生 .click() 的理由是行为更贴真人：它走浏览器的模拟点击算法，和浏览器自身一致地
+        // 对不可点击元素静默丢弃，不会把事件硬塞给 disabled 节点；只有它明显打不到（元素已禁用/
+        // 已脱离文档，或 click 事件根本没派发出去）时才回落到下面的合成链路兜底 ——
+        // 兜底链路不能删：少数版本把处理器绑在 mousedown/mouseup 上，
+        // 也有元素被业务置成 aria-disabled 但监听器还在，只有合成事件才送得进去。
+        if (this.nativeClickLeaf(target)) return true;
         const view = target.ownerDocument?.defaultView || window;
         let dispatched = false;
         for (const type of ['mousedown', 'mouseup', 'click']) {

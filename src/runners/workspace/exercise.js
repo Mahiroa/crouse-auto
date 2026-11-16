@@ -15,6 +15,9 @@
     exerciseSubmitConfirmed(root) {
       const container = Y.AiWorkspace.getExerciseContainer() || root;
       if (!container) return '';
+      // 提交确认弹窗还开着时，提交按钮的禁用态是「等你确认」而不是「已交卷」：
+      // 这时把禁用当确认信号，会让每一题都被记成已提交，实际全没交（v3.6.6 真机就是这样）。
+      if (Y.Utils.pendingSubmitDialog?.()) return '';
       const questionRoot = Y.AiWorkspace.getExerciseQuestionBody(container) || container;
       if (Y.Solver.revealedResult(questionRoot)) return '本题得分/正确答案已出现';
       if (Y.AiWorkspace.isExerciseAnswered(questionRoot)) return '已作答/已完成';
@@ -192,6 +195,9 @@
       this.panel.log(`开始处理作业：${Y.AiWorkspace.getActiveLeafTitle() || route.leafId}`);
       if (Y.Utils.isFastMode()) this.panel.log('快速模式已开启，读题和点击不再等待');
       let previousFingerprint = '';
+      // 作业里没答成的题记在这里：以前失败只打一行「AI 答题失败」，整份作业结束时
+      // 看不出还剩几题没交，用户只能翻平台。收尾统一报一次。
+      const unsolved = [];
       for (let i = 0; i < 40; i++) {
         const currentRoot = Y.AiWorkspace.getExerciseContainer() || root;
         const questionRoot = Y.AiWorkspace.getExerciseQuestionBody(currentRoot);
@@ -228,6 +234,7 @@
           continue;
         }
         const solved = await this.solveExerciseQuestion(currentRoot, `第 ${i + 1} 题`, fingerprint);
+        if (!solved) unsolved.push(`第 ${i + 1} 题`);
         previousFingerprint = fingerprint;
         let shown = null;
         let jumped = false;
@@ -260,6 +267,9 @@
         }
         const opened = await this.openNextExerciseQuestion(currentRoot, fingerprint);
         if (!opened) break;
+      }
+      if (unsolved.length) {
+        this.panel.log(`本次作业有 ${unsolved.length} 题没答成：${unsolved.join('、')}。可以重跑本小节，命中答案缓存的题会直接提交`);
       }
       return true;
     },

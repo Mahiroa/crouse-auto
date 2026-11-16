@@ -77,7 +77,8 @@
         try { window.close(); } catch (_) {}
         return true;
       } catch (e) {
-        console.error('跳转父窗口异常', e);
+        // 日志归口：异常交给 Stealth，quiet 时只进面板，不往页面控制台写
+        Y.Stealth?.warn?.('跳转父窗口异常', e);
         this.panel.log(`返回课程目录页失败：${e.message || e}`);
         return false;
       }
@@ -168,8 +169,8 @@
       this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${playback.playbackRate}x，静音${playback.muted ? '开启' : '关闭'}（就绪等待 ${readyCost.toFixed(1)} 秒${readyNote}）`);
       if (patchOnly) {
         // 只看掉了一大半、缺口是几小段：不整段重播，直接按缺口补播。
-        // 要先停掉 observePause —— 它每 1 秒 enforceSettings 一次，会把我们 seek 好的位置和
-        // 1 倍速补刷速度盖回去，补刷就白补了。
+        // 要先停掉 observePause —— 它每 0.8~1.4 秒（抖动节拍，见 player/observe.js）enforceSettings 一次，
+        // 会把我们 seek 好的位置和 1 倍速补刷速度盖回去，补刷就白补了。
         stopObserve();
         // 观察器停掉后播放器还在播，先按住：后面 2.5 秒「等平台补记账」的空档里让它继续播，
         // 会把续播点往后那几秒提前记上，缺口位置跟着变，补播就补错地方了

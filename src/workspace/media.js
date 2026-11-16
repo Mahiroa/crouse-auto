@@ -121,12 +121,36 @@
           media.play().catch(() => { });
         }
       };
-      const timer = setInterval(tick, 8000);
+      // 固定 8 秒心跳（setInterval）是自动化探针 automation-risk-probe 最容易抓的节拍特征：
+      // 改成「自调度 + 抖动」，每轮跑完再用 Y.Utils.randInt 随机排下一轮（6500~9500ms），节拍不可预测。
+      // 首跳不放慢：下面仍然立刻 tick() 一次（保活要第一时间补倍速/静音并接管暂停），之后才进抖动循环。
+      // loop 是文件内局部实现，不新增模块、不动 manifest。
+      let timer = null;
+      let stopped = false;
+      const loop = () => {
+        if (stopped) return;
+        timer = setTimeout(() => {
+          timer = null;
+          if (stopped) return;
+          try {
+            tick();
+          } finally {
+            // 抛错也不许断链：原来的 setInterval 就是「这一轮出错，下一轮照跑」
+            if (!stopped) loop();
+          }
+        }, Y.Utils.randInt(6500, 9500));
+      };
       Y.addNativeListener(document, 'visibilitychange', tick);
       Y.addNativeListener(window, 'focus', tick);
       tick();
+      loop();
       return () => {
-        clearInterval(timer);
+        // 先置标记、再清 id：已经排进队列的那一轮醒来第一件事是看 stopped 并退出，不会再排新链
+        stopped = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         if (lastMedia) lastMedia.removeEventListener('pause', tick);
         document.removeEventListener('visibilitychange', tick);
         window.removeEventListener('focus', tick);
