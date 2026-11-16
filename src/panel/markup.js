@@ -205,6 +205,9 @@
           white-space: nowrap;
         }
         .chip:hover { border-color: #bcd0f5; background: #f0f5ff; color: var(--brand-strong); }
+          /* 有新版本时才出现，和其它 chip 区分开 */
+          .update-chip { border-color: #2f6fed; color: #1d4ed8; font-weight: 600; }
+          .update-chip:hover { background: #2f6fed; color: #fff; border-color: #2f6fed; }
         .chip.on { border-color: #bcd0f5; background: var(--brand-soft); color: var(--brand-strong); }
 
         .timeline-wrap {
@@ -718,6 +721,7 @@
               <button class="chip" id="quick-speed" type="button" title="点击切换播放倍速">2×</button>
               <button class="chip" id="quick-mute" type="button" title="点击切换静音">静音开</button>
               <button class="chip" id="quick-fast" type="button" title="点击切换快速模式">快速关</button>
+              <button class="chip update-chip" id="quick-update" type="button" title="发现新版本，点击更新" hidden>更新</button>
             </div>
           </section>
 
@@ -741,6 +745,7 @@
             <div class="menu">
               <button id="btn-clear" type="button">清除进度缓存</button>
               <button id="btn-reload" type="button">重新加载并继续</button>
+              <button id="btn-check-update" type="button">检查更新</button>
             </div>
           </details>
         </footer>

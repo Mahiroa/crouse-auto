@@ -74,6 +74,8 @@
       quickSpeed: doc.getElementById('quick-speed'),
       quickMute: doc.getElementById('quick-mute'),
       quickFast: doc.getElementById('quick-fast'),
+      quickUpdate: doc.getElementById('quick-update'),
+      btnCheckUpdate: doc.getElementById('btn-check-update'),
       logCount: doc.getElementById('log-count'),
       runlog: doc.getElementById('runlog'),
       more: doc.getElementById('more'),
@@ -543,6 +545,32 @@
       setTimeout(() => hostWindow.location.reload(), 300);
     };
 
+    // 更新：只在 Y.Updater 查到新版本时亮起，点一下打开固定资产名的安装页（篡改猴会接管成安装界面）
+    if (ui.quickUpdate) {
+      ui.quickUpdate.addEventListener('click', () => {
+        const version = String(Y.Updater?.pendingVersion || '').replace(/^v/i, '');
+        if (version) log(`更新到 v${version}：正在打开安装页...`);
+        Y.Updater?.openDownload?.();
+      });
+      ui.quickUpdate.hidden = !Y.Updater?.pendingVersion;
+    }
+    if (ui.btnCheckUpdate) {
+      ui.btnCheckUpdate.onclick = async () => {
+        ui.more.open = false;
+        if (!Y.Updater) {
+          log('当前版本的更新模块未加载');
+          return;
+        }
+        log('正在检查更新...');
+        const result = await Y.Updater.checkForUpdate({ manual: true, force: true });
+        if (result?.status === 'latest') log(`已是最新版本 v${result.current}`);
+        if (result?.status === 'newer') {
+          log(`发现新版本 v${result.remote}，点面板上的「更新」按钮安装`);
+        }
+        if (result?.status === 'error') log(`检查更新失败：${result.message}`);
+      };
+    }
+
     // 重新加载：重建自动恢复标记后刷新页面，刷新后自动恢复刷课（停止后点击同样生效）
     ui.btnReload.onclick = () => {
       ui.more.open = false;
@@ -664,6 +692,14 @@
       setStartHandler(fn) {
         startHandler = fn;
         ui.btnStart.onclick = invokeStart;
+      },
+      // Y.Updater 查到新版本时调它：把「更新」chip 亮出来，并写一行日志
+      showUpdate(info) {
+        const version = String(info?.remote || '').replace(/^v/i, '');
+        if (!version || !ui.quickUpdate) return;
+        ui.quickUpdate.textContent = `更新 v${version}`;
+        ui.quickUpdate.hidden = false;
+        log(`发现新版本 v${version}（当前 v${info?.current || Y.Config.version}），点面板上的「更新 v${version}」安装`);
       },
       start() {
         invokeStart();

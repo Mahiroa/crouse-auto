@@ -53,6 +53,13 @@
       try {
         Y.Utils.startWatchdog?.();
       } catch (_) {}
+      // 启动后静默查一次 GitHub Release：有新版就把面板上的「更新」按钮亮出来。
+      // 延迟几秒，别和课程目录/播放器的首屏抢请求；没有新版本时不说话。
+      setTimeout(() => {
+        try {
+          Y.Updater?.checkForUpdate?.({ force: false });
+        } catch (_) {}
+      }, 4000);
     } catch (err) {
       Y.Stealth?.warn?.('面板初始化失败', err);
       // 文档没就绪 / 挂载点没出来时等 DOM 就绪再试一次；仍失败就留一条页面级提示
